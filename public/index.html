@@ -1,0 +1,61 @@
+﻿<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Words Check - Analog Homework Board</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="grain"></div>
+    <main class="page">
+      <header class="topbar reveal">
+        <div>
+          <p class="stamp">Homework Delivery Automation</p>
+          <h1>Words Check Notebook</h1>
+        </div>
+        <div class="topbar-actions">
+          <p id="whoami" class="whoami">로그인 필요</p>
+          <button id="logoutBtn" class="btn btn-ghost" hidden>로그아웃</button>
+        </div>
+      </header>
+
+      <section id="loginPanel" class="paper reveal">
+        <div class="paper-head">
+          <h2>로그인</h2>
+          <p>학생/교사/학부모 계정으로 접속하세요.</p>
+        </div>
+        <form id="loginForm" class="lined-form">
+          <label>
+            이메일
+            <input type="email" name="email" value="student@example.com" required />
+          </label>
+          <label>
+            비밀번호
+            <input type="password" name="password" value="pass1234" required />
+          </label>
+          <label>
+            디바이스 ID
+            <input type="text" name="deviceFingerprint" id="deviceFingerprintInput" required />
+          </label>
+          <label class="check-row">
+            <input type="checkbox" name="rememberLogin" id="rememberLoginInput" checked />
+            <span>자동 로그인 유지</span>
+          </label>
+          <button type="submit" class="btn">입장하기</button>
+        </form>
+        <div id="loginRouteHint" class="login-route-hint hidden"></div>
+      </section>
+
+      <section id="appPanel" class="hidden">
+        <section id="studentView" class="hidden reveal"></section>
+        <section id="teacherView" class="hidden reveal"></section>
+        <section id="parentView" class="hidden reveal"></section>
+      </section>
+
+      <section id="toast" class="toast hidden"></section>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

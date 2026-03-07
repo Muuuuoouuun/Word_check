@@ -1,0 +1,29 @@
+{
+  "name": "words_check",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node src/index.js",
+    "dev": "node src/index.js",
+    "init-db": "node src/scripts/initDb.js",
+    "seed": "node src/scripts/seed.js",
+    "setup": "node src/scripts/initDb.js && node src/scripts/seed.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^12.6.2",
+    "csv-parse": "^6.1.0",
+    "dotenv": "^17.3.1",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.1.1",
+    "node-cron": "^4.2.1",
+    "qrcode": "^1.5.4"
+  }
+}

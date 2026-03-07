@@ -1,0 +1,271 @@
+datasource db {
+  provider = "sqlite"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum UserRole {
+  STUDENT
+  TEACHER
+  PARENT
+  ADMIN
+}
+
+enum AssignmentStatus {
+  SCHEDULED
+  PUBLISHED
+  IN_PROGRESS
+  COMPLETED
+  MISSED
+  CANCELED
+}
+
+enum QuestionType {
+  DIRECT_TRANSLATION
+  FILL_IN_BLANK
+}
+
+enum NotificationTier {
+  TIER1_STUDENT_ASSIGN
+  TIER2_STUDENT_REMIND
+  TIER3_PARENT_REPORT
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+model User {
+  id           String    @id @default(cuid())
+  role         UserRole
+  email        String    @unique
+  passwordHash String
+  studentId    String?   @unique
+  parentId     String?   @unique
+  teacherId    String?   @unique
+  student      Student?  @relation(fields: [studentId], references: [id])
+  parent       Parent?   @relation(fields: [parentId], references: [id])
+  teacher      Teacher?  @relation(fields: [teacherId], references: [id])
+  sessions     AuthSession[]
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model Teacher {
+  id           String              @id @default(cuid())
+  name         String
+  assignments  HomeworkAssignment[]
+  vocabSources VocabSource[]
+  user         User?
+}
+
+model Student {
+  id           String               @id @default(cuid())
+  studentCode  String               @unique
+  name         String
+  timezone     String               @default("Asia/Seoul")
+  parents      StudentParent[]
+  devices      StudentDevice[]
+  assignments  HomeworkAssignment[]
+  testSessions TestSession[]
+  notifications NotificationLog[]
+  user         User?
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+}
+
+model Parent {
+  id            String            @id @default(cuid())
+  name          String
+  phone         String?
+  email         String?
+  students      StudentParent[]
+  notifications NotificationLog[]
+  user          User?
+}
+
+model StudentParent {
+  id              String  @id @default(cuid())
+  studentId       String
+  parentId        String
+  relationLabel   String?
+  receivesReports Boolean @default(true)
+  student         Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  parent          Parent  @relation(fields: [parentId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, parentId])
+}
+
+model Device {
+  id          String         @id @default(cuid())
+  fingerprint String         @unique
+  pushToken   String?
+  bindings    StudentDevice[]
+  sessions    AuthSession[]
+}
+
+model StudentDevice {
+  id         String   @id @default(cuid())
+  studentId  String
+  deviceId   String
+  isPrimary  Boolean  @default(false)
+  assignedAt DateTime @default(now())
+  revokedAt  DateTime?
+  student    Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  device     Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, deviceId])
+}
+
+model AuthSession {
+  id               String   @id @default(cuid())
+  userId           String
+  deviceId         String
+  refreshTokenHash String   @unique
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device           Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  createdAt        DateTime @default(now())
+}
+
+model VocabSource {
+  id             String              @id @default(cuid())
+  name           String
+  sourceType     String
+  ownerTeacherId String?
+  metadata       String?
+  lessons        VocabLesson[]
+  items          VocabItem[]
+  assignments    HomeworkAssignment[]
+  ownerTeacher   Teacher?            @relation(fields: [ownerTeacherId], references: [id])
+  createdAt      DateTime            @default(now())
+}
+
+model VocabLesson {
+  id       String      @id @default(cuid())
+  sourceId String
+  lessonNo Int
+  title    String?
+  source   VocabSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  items    VocabItem[]
+
+  @@unique([sourceId, lessonNo])
+}
+
+model VocabItem {
+  id              String       @id @default(cuid())
+  sourceId        String
+  lessonId        String?
+  lemma           String
+  meaningPrimary  String
+  exampleSentence String?
+  source          VocabSource  @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  lesson          VocabLesson? @relation(fields: [lessonId], references: [id], onDelete: SetNull)
+  questions       TestQuestion[]
+}
+
+model HomeworkAssignment {
+  id               String           @id @default(cuid())
+  studentId        String
+  teacherId        String
+  sourceId         String
+  rangeStartLesson Int
+  rangeEndLesson   Int
+  questionCount    Int
+  publishAt        DateTime
+  dueAt            DateTime
+  status           AssignmentStatus @default(SCHEDULED)
+  student          Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  teacher          Teacher          @relation(fields: [teacherId], references: [id])
+  source           VocabSource      @relation(fields: [sourceId], references: [id])
+  testSession      TestSession?
+  notifications    NotificationLog[]
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+}
+
+model TestSession {
+  id            String           @id @default(cuid())
+  assignmentId  String           @unique
+  studentId     String
+  status        AssignmentStatus @default(PUBLISHED)
+  generatedSeed String
+  startedAt     DateTime?
+  completedAt   DateTime?
+  score         Int?
+  outOf         Int?
+  lockedAt      DateTime?
+  assignment    HomeworkAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  student       Student            @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  questions     TestQuestion[]
+  answers       StudentAnswer[]
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+}
+
+model TestQuestion {
+  id              String       @id @default(cuid())
+  testSessionId   String
+  vocabItemId     String
+  orderNo         Int
+  type            QuestionType
+  prompt          String
+  expectedAnswer  String
+  blankSentence   String?
+  isTeacherEdited Boolean      @default(false)
+  testSession     TestSession  @relation(fields: [testSessionId], references: [id], onDelete: Cascade)
+  vocabItem       VocabItem    @relation(fields: [vocabItemId], references: [id])
+  answers         StudentAnswer[]
+
+  @@unique([testSessionId, orderNo])
+}
+
+model StudentAnswer {
+  id            String       @id @default(cuid())
+  testSessionId String
+  questionId    String
+  response      String
+  isCorrect     Boolean
+  answeredAt    DateTime     @default(now())
+  testSession   TestSession  @relation(fields: [testSessionId], references: [id], onDelete: Cascade)
+  question      TestQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([testSessionId, questionId])
+}
+
+model NotificationLog {
+  id             String             @id @default(cuid())
+  assignmentId   String
+  studentId      String?
+  parentId       String?
+  tier           NotificationTier
+  channel        String
+  status         NotificationStatus @default(PENDING)
+  scheduledAt    DateTime
+  sentAt         DateTime?
+  attemptCount   Int                @default(0)
+  errorMessage   String?
+  payload        String?
+  idempotencyKey String             @unique
+  assignment     HomeworkAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  student        Student?           @relation(fields: [studentId], references: [id], onDelete: SetNull)
+  parent         Parent?            @relation(fields: [parentId], references: [id], onDelete: SetNull)
+  createdAt      DateTime           @default(now())
+}
+
+model OutboxEvent {
+  id            String   @id @default(cuid())
+  eventType     String
+  aggregateType String
+  aggregateId   String
+  payload       String
+  createdAt     DateTime @default(now())
+  publishedAt   DateTime?
+  retryCount    Int      @default(0)
+}
