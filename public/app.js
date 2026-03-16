@@ -1,5 +1,17 @@
 ﻿(() => {
   const AUTH_STORAGE_KEYS = ["accessToken", "role", "studentId", "teacherId", "parentId"];
+  const TEACHER_COMPACT_LAYOUT_QUERY = "(max-width: 780px)";
+  const EXAM_AUTOFOCUS_VIEWPORT_QUERY = "(max-width: 820px)";
+  const COARSE_POINTER_QUERY = "(pointer: coarse)";
+  const teacherCompactLayoutMedia = window.matchMedia(TEACHER_COMPACT_LAYOUT_QUERY);
+  const LOADING_WORDS = [
+    { word: "apple", meaning: "사과" },
+    { word: "orbit", meaning: "궤도" },
+    { word: "whisper", meaning: "속삭임" },
+    { word: "lantern", meaning: "등불" },
+    { word: "memory", meaning: "기억" },
+    { word: "notebook", meaning: "공책" },
+  ];
 
   function readStoredAuth(key) {
     return localStorage.getItem(key) || sessionStorage.getItem(key) || null;
@@ -14,6 +26,10 @@
 
   function authStorage(rememberLogin) {
     return rememberLogin ? localStorage : sessionStorage;
+  }
+
+  function defaultTeacherViewMode() {
+    return teacherCompactLayoutMedia.matches ? "LIST" : "BOTH";
   }
 
   const state = {
@@ -36,13 +52,16 @@
       status: "ALL",
       keyword: "",
     },
-    teacherViewMode: "BOTH",
+    teacherViewMode: defaultTeacherViewMode(),
+    teacherViewModeAuto: true,
     teacherWeekOffset: 0,
     teacherEditingSessionId: null,
     teacherQuestions: [],
     teacherOfflineSessionId: null,
     teacherOfflineQuestions: [],
     teacherOfflineContext: null,
+    teacherSupplementSessionId: null,
+    teacherSupplementContext: null,
   };
 
   const loginPanel = document.getElementById("loginPanel");
@@ -54,12 +73,99 @@
   const logoutBtn = document.getElementById("logoutBtn");
   const toastEl = document.getElementById("toast");
   const loginRouteHint = document.getElementById("loginRouteHint");
+  const loadingOverlay = document.getElementById("loadingOverlay");
+  const loadingLabel = document.getElementById("loadingLabel");
+  const loadingWord = document.getElementById("loadingWord");
+  const loadingMeaning = document.getElementById("loadingMeaning");
+  const loadingWordStack = loadingOverlay.querySelector(".loading-word-stack");
 
   const fpInput = document.getElementById("deviceFingerprintInput");
   const rememberLoginInput = document.getElementById("rememberLoginInput");
   const savedFingerprint = localStorage.getItem("deviceFingerprint") || `device-${Math.random().toString(16).slice(2)}`;
   fpInput.value = savedFingerprint;
   rememberLoginInput.checked = state.rememberLogin;
+  const loadingState = {
+    depth: 0,
+    showTimerId: null,
+    hideTimerId: null,
+    rotationTimerId: null,
+    switchTimerId: null,
+    wordIndex: 0,
+  };
+
+  function syncTeacherViewModeForViewport(force = false) {
+    if (!force && !state.teacherViewModeAuto) return false;
+
+    const nextMode = defaultTeacherViewMode();
+    const changed = state.teacherViewMode !== nextMode;
+    state.teacherViewMode = nextMode;
+    state.teacherViewModeAuto = true;
+    return changed;
+  }
+
+  function setLoadingWord(index) {
+    const item = LOADING_WORDS[index % LOADING_WORDS.length];
+    window.clearTimeout(loadingState.switchTimerId);
+    loadingWordStack.classList.add("is-switching");
+    loadingState.switchTimerId = window.setTimeout(() => {
+      loadingWord.textContent = item.word;
+      loadingMeaning.textContent = item.meaning;
+      loadingWordStack.classList.remove("is-switching");
+    }, 110);
+  }
+
+  function startLoadingRotation() {
+    if (loadingState.rotationTimerId) return;
+    setLoadingWord(loadingState.wordIndex);
+    loadingState.rotationTimerId = window.setInterval(() => {
+      loadingState.wordIndex = (loadingState.wordIndex + 1) % LOADING_WORDS.length;
+      setLoadingWord(loadingState.wordIndex);
+    }, 950);
+  }
+
+  function stopLoadingRotation() {
+    window.clearTimeout(loadingState.switchTimerId);
+    if (!loadingState.rotationTimerId) return;
+    window.clearInterval(loadingState.rotationTimerId);
+    loadingState.rotationTimerId = null;
+  }
+
+  function beginLoading(label = "단어장을 준비하는 중") {
+    loadingState.depth += 1;
+    loadingLabel.textContent = label;
+
+    if (loadingState.depth > 1) return;
+
+    window.clearTimeout(loadingState.hideTimerId);
+    loadingState.showTimerId = window.setTimeout(() => {
+      loadingOverlay.classList.remove("hidden");
+      loadingOverlay.setAttribute("aria-hidden", "false");
+      startLoadingRotation();
+    }, 120);
+  }
+
+  function endLoading() {
+    if (loadingState.depth === 0) return;
+    loadingState.depth -= 1;
+
+    if (loadingState.depth > 0) return;
+
+    window.clearTimeout(loadingState.showTimerId);
+    loadingState.hideTimerId = window.setTimeout(() => {
+      loadingOverlay.classList.add("hidden");
+      loadingOverlay.setAttribute("aria-hidden", "true");
+      stopLoadingRotation();
+    }, 120);
+  }
+
+  async function withLoading(task, label) {
+    beginLoading(label);
+    try {
+      return await task();
+    } finally {
+      endLoading();
+    }
+  }
 
   function toast(message, ms = 2200) {
     toastEl.textContent = message;
@@ -118,51 +224,68 @@
     state.teacherSettings = null;
     state.teacherSettingsOwnerId = null;
     state.teacherAccessLink = null;
-    state.teacherViewMode = "BOTH";
+    state.teacherViewMode = defaultTeacherViewMode();
+    state.teacherViewModeAuto = true;
     state.teacherWeekOffset = 0;
     state.teacherEditingSessionId = null;
     state.teacherQuestions = [];
     state.teacherOfflineSessionId = null;
     state.teacherOfflineQuestions = [];
     state.teacherOfflineContext = null;
+    state.teacherSupplementSessionId = null;
+    state.teacherSupplementContext = null;
 
     clearStoredAuth();
     setLoginRouteHint("");
   }
 
   async function api(path, options = {}) {
-    const headers = { ...(options.headers || {}) };
-    const isFormData = options.body instanceof FormData;
+    const { loadingLabel: loadingText, showLoading = true, ...requestOptions } = options;
+    const headers = { ...(requestOptions.headers || {}) };
+    const isFormData = requestOptions.body instanceof FormData;
 
-    if (!isFormData && options.body && !headers["Content-Type"]) {
+    if (!isFormData && requestOptions.body && !headers["Content-Type"]) {
       headers["Content-Type"] = "application/json";
     }
     if (state.token) {
       headers.Authorization = `Bearer ${state.token}`;
     }
 
-    const res = await fetch(path, {
-      ...options,
-      headers,
-      body: !isFormData && options.body && typeof options.body !== "string" ? JSON.stringify(options.body) : options.body,
-    });
+    if (showLoading) {
+      beginLoading(loadingText);
+    }
 
-    if (!res.ok) {
-      let msg = `${res.status} 오류`;
-      try {
-        const j = await res.json();
-        if (j.message) msg = j.message;
-      } catch {
-        // no-op
+    try {
+      const res = await fetch(path, {
+        ...requestOptions,
+        headers,
+        body:
+          !isFormData && requestOptions.body && typeof requestOptions.body !== "string"
+            ? JSON.stringify(requestOptions.body)
+            : requestOptions.body,
+      });
+
+      if (!res.ok) {
+        let msg = `${res.status} 오류`;
+        try {
+          const j = await res.json();
+          if (j.message) msg = j.message;
+        } catch {
+          // no-op
+        }
+        throw new Error(msg);
       }
-      throw new Error(msg);
-    }
 
-    if ((res.headers.get("Content-Type") || "").includes("application/json")) {
-      return res.json();
-    }
+      if ((res.headers.get("Content-Type") || "").includes("application/json")) {
+        return res.json();
+      }
 
-    return res;
+      return res;
+    } finally {
+      if (showLoading) {
+        endLoading();
+      }
+    }
   }
 
   function getLoginTokenFromUrl() {
@@ -241,10 +364,322 @@
     parentView.classList.toggle("hidden", state.role !== "PARENT");
   }
 
+  function renderViewSkeleton(target, variant = "student") {
+    const skeletonCards = {
+      student: 4,
+      teacher: 5,
+      parent: 3,
+    };
+    const cardCount = skeletonCards[variant] || 3;
+    const cards = Array.from({ length: cardCount }, (_, index) => {
+      const isWide = index === 0 && variant !== "parent";
+      return `
+        <article class="skeleton-block${isWide ? " wide" : ""}">
+          <div class="skeleton-line title"></div>
+          <div class="skeleton-line body"></div>
+          <div class="skeleton-line body short"></div>
+        </article>
+      `;
+    }).join("");
+
+    target.innerHTML = `
+      <section class="paper skeleton-paper reveal" aria-hidden="true">
+        <div class="paper-head">
+          <div class="skeleton-line heading"></div>
+          <div class="skeleton-line body"></div>
+        </div>
+        <div class="kpi-grid skeleton-kpi-grid">
+          <article class="kpi skeleton-kpi"><div class="skeleton-line label"></div><div class="skeleton-line value"></div></article>
+          <article class="kpi skeleton-kpi"><div class="skeleton-line label"></div><div class="skeleton-line value"></div></article>
+          <article class="kpi skeleton-kpi"><div class="skeleton-line label"></div><div class="skeleton-line value"></div></article>
+          <article class="kpi skeleton-kpi"><div class="skeleton-line label"></div><div class="skeleton-line value"></div></article>
+        </div>
+        <div class="skeleton-stack ${variant === "teacher" ? "teacher" : ""}">
+          ${cards}
+        </div>
+      </section>
+    `;
+  }
+
+  function statusLabel(status) {
+    const labels = {
+      SCHEDULED: "배정 예정",
+      PUBLISHED: "배부됨",
+      IN_PROGRESS: "응시 중",
+      COMPLETED: "완료",
+      MISSED: "놓침",
+    };
+    return labels[status] || status || "-";
+  }
+
   function statusBadge(status) {
-    if (status === "MISSED") return `<span class="badge missed">${status}</span>`;
-    if (status === "COMPLETED") return `<span class="badge done">${status}</span>`;
-    return `<span class="badge">${status}</span>`;
+    const label = statusLabel(status);
+    if (status === "MISSED") return `<span class="badge missed">${label}</span>`;
+    if (status === "COMPLETED") return `<span class="badge done">${label}</span>`;
+    return `<span class="badge">${label}</span>`;
+  }
+
+  function isTodayLocal(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return false;
+    const now = new Date();
+    return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+  }
+
+  function teacherPublishReady(assignment) {
+    if (assignment.status !== "SCHEDULED") return false;
+    const publishAtMs = new Date(assignment.publish_at).getTime();
+    return Number.isFinite(publishAtMs) && publishAtMs <= Date.now();
+  }
+
+  function teacherDueSoon(assignment, hours = 24) {
+    if (assignment.test_session_status === "COMPLETED" || assignment.status === "COMPLETED") return false;
+    const dueAtMs = new Date(assignment.due_at).getTime();
+    if (!Number.isFinite(dueAtMs)) return false;
+    const diff = dueAtMs - Date.now();
+    return diff >= 0 && diff <= hours * 60 * 60 * 1000;
+  }
+
+  function teacherNeedsAttention(assignment) {
+    return !assignment.test_session_id || teacherPublishReady(assignment) || assignment.status === "MISSED" || teacherDueSoon(assignment);
+  }
+
+  function teacherPriorityScore(assignment) {
+    if (assignment.status === "MISSED") return 0;
+    if (!assignment.test_session_id) return 1;
+    if (teacherPublishReady(assignment)) return 2;
+    if (teacherDueSoon(assignment, 6)) return 3;
+    if (teacherDueSoon(assignment, 24)) return 4;
+    if (assignment.status === "IN_PROGRESS" || assignment.test_session_status === "IN_PROGRESS") return 5;
+    if (assignment.status === "PUBLISHED") return 6;
+    if (assignment.status === "SCHEDULED") return 7;
+    if (assignment.test_session_status === "COMPLETED" || assignment.status === "COMPLETED") return 8;
+    return 9;
+  }
+
+  function teacherAssignmentSituation(assignment) {
+    if (assignment.status === "MISSED") return "학생이 과제를 놓쳤습니다.";
+    if (!assignment.test_session_id) return "시험지를 먼저 만들어야 합니다.";
+    if (teacherPublishReady(assignment)) return "배부 시각이 되었지만 아직 열리지 않았습니다.";
+    if (assignment.status === "SCHEDULED") return `자동 배부 예정: ${fmtDate(assignment.publish_at)}`;
+    if (assignment.status === "IN_PROGRESS" || assignment.test_session_status === "IN_PROGRESS") return "학생이 현재 시험을 진행 중입니다.";
+    if (teacherDueSoon(assignment, 24)) return "오늘 안에 확인이 필요한 과제입니다.";
+    if (assignment.status === "PUBLISHED") return "학생 응시를 기다리는 상태입니다.";
+    if (assignment.test_session_status === "COMPLETED" || assignment.status === "COMPLETED") return "제출이 완료되어 후속 복습만 남았습니다.";
+    return "현재 과제 상태를 확인할 수 있습니다.";
+  }
+
+  function teacherPrimaryAction(assignment) {
+    if (!assignment.test_session_id) {
+      return {
+        type: "generate",
+        label: "시험지 만들기",
+        style: "btn btn-warm assignment-primary-btn",
+        note: "시험지가 아직 없습니다. 먼저 문제를 생성하세요.",
+      };
+    }
+
+    if (teacherPublishReady(assignment)) {
+      return {
+        type: "publish",
+        label: "지금 배부",
+        style: "btn btn-warm assignment-primary-btn",
+        note: "자동 배부 시각이 지났습니다. 지금 바로 학생에게 열어줄 수 있습니다.",
+      };
+    }
+
+    if (assignment.status === "MISSED") {
+      return {
+        type: "offline",
+        label: "오프라인 반영",
+        style: "btn btn-warm assignment-primary-btn",
+        note: "종이 시험이나 구두 확인 결과가 있으면 바로 점수를 반영하세요.",
+      };
+    }
+
+    if (assignment.status === "IN_PROGRESS" || assignment.test_session_status === "IN_PROGRESS") {
+      return {
+        type: "offline",
+        label: "오프라인 마감",
+        style: "btn btn-quiet assignment-primary-btn",
+        note: "현장 응시로 마감해야 한다면 여기서 바로 처리할 수 있습니다.",
+      };
+    }
+
+    if (assignment.test_session_status === "COMPLETED" || assignment.status === "COMPLETED") {
+      return {
+        type: "supplement",
+        label: "보충 과제 만들기",
+        style: "btn btn-quiet assignment-primary-btn",
+        note: "틀린 문제 위주 보충 과제를 다시 배정할 수 있습니다.",
+      };
+    }
+
+    if (assignment.status === "PUBLISHED") {
+      return {
+        type: "edit",
+        label: "문항 확인",
+        style: "btn btn-quiet assignment-primary-btn",
+        note: "학생이 시작하기 전 문항과 정답을 다시 확인할 수 있습니다.",
+      };
+    }
+
+    return {
+      type: null,
+      label: "자동 진행 중",
+      style: "assignment-inline-note",
+      note: teacherAssignmentSituation(assignment),
+    };
+  }
+
+  function teacherActionButtonMarkup(actionType, assignment, label, className = "btn btn-quiet") {
+    if (!actionType) return "";
+
+    if (actionType === "generate") {
+      return `<button class="${className}" type="button" data-act="generate" data-assignment-id="${assignment.id}">${label}</button>`;
+    }
+    if (actionType === "publish") {
+      return `<button class="${className}" type="button" data-act="publish" data-assignment-id="${assignment.id}">${label}</button>`;
+    }
+    if (actionType === "edit" && assignment.test_session_id) {
+      return `<button class="${className}" type="button" data-act="edit" data-session-id="${assignment.test_session_id}">${label}</button>`;
+    }
+    if (actionType === "offline" && assignment.test_session_id) {
+      return `<button class="${className}" type="button" data-act="offline" data-session-id="${assignment.test_session_id}">${label}</button>`;
+    }
+    if (actionType === "supplement" && assignment.test_session_id) {
+      return `<button class="${className}" type="button" data-act="supplement" data-session-id="${assignment.test_session_id}">${label}</button>`;
+    }
+    if (actionType === "copy") {
+      return `<button class="${className}" type="button" data-act="copy" data-assignment-id="${assignment.id}">${label}</button>`;
+    }
+    if (actionType === "export") {
+      return `<button class="${className}" type="button" data-act="export" data-assignment-id="${assignment.id}">${label}</button>`;
+    }
+    return "";
+  }
+
+  function teacherSecondaryActions(assignment, primaryActionType) {
+    const actions = [];
+
+    if (!assignment.test_session_id) {
+      actions.push({ type: "generate", label: "시험지 만들기" });
+    }
+    if (assignment.status === "SCHEDULED") {
+      actions.push({ type: "publish", label: "지금 배부" });
+    }
+    if (assignment.test_session_id) {
+      actions.push({ type: "edit", label: "문항 편집" });
+      if (assignment.test_session_status !== "COMPLETED") {
+        actions.push({ type: "offline", label: "오프라인 입력" });
+      }
+      if (assignment.test_session_status === "COMPLETED") {
+        actions.push({ type: "supplement", label: "보충 과제" });
+      }
+    }
+
+    actions.push({ type: "export", label: "엑셀 내보내기" });
+    actions.push({ type: "copy", label: "ID 복사" });
+
+    return actions.filter((action, index, arr) => {
+      if (action.type === primaryActionType) return false;
+      return arr.findIndex((candidate) => candidate.type === action.type) === index;
+    });
+  }
+
+  function teacherAssignmentStatusMarkup(assignment) {
+    const sessionBadge = assignment.test_session_id ? statusBadge(assignment.test_session_status) : '<span class="badge">시험지 없음</span>';
+    return `
+      <div class="assignment-status-stack">
+        <div class="row assignment-status-row">
+          ${statusBadge(assignment.status)}
+          ${sessionBadge}
+        </div>
+        <p class="meta assignment-status-copy">${escapeHtml(teacherAssignmentSituation(assignment))}</p>
+      </div>
+    `;
+  }
+
+  function teacherDueCopy(assignment) {
+    if (assignment.status === "MISSED") return "마감 지남";
+    if (isTodayLocal(assignment.due_at)) return "오늘 마감";
+    if (teacherDueSoon(assignment, 24)) return "24시간 이내";
+    return "일정 확인";
+  }
+
+  function teacherAssignmentActionsMarkup(assignment) {
+    const primary = teacherPrimaryAction(assignment);
+    const primaryButton = teacherActionButtonMarkup(primary.type, assignment, primary.label, primary.style);
+    const secondaryActions = teacherSecondaryActions(assignment, primary.type)
+      .map((action) => teacherActionButtonMarkup(action.type, assignment, action.label, "btn btn-quiet action-chip"))
+      .join("");
+
+    return `
+      <div class="assignment-action-stack">
+        <div class="assignment-primary-action">
+          ${
+            primaryButton
+              ? primaryButton
+              : `<div class="assignment-inline-note"><strong>${escapeHtml(primary.label)}</strong><span>${escapeHtml(primary.note)}</span></div>`
+          }
+          <p class="meta assignment-action-copy">${escapeHtml(primary.note)}</p>
+        </div>
+        ${
+          secondaryActions
+            ? `
+              <details class="assignment-more">
+                <summary class="mini-btn">추가 작업</summary>
+                <div class="assignment-secondary-actions">
+                  ${secondaryActions}
+                </div>
+              </details>
+            `
+            : ""
+        }
+      </div>
+    `;
+  }
+
+  function teacherAssignmentMobileCardsMarkup(items) {
+    if (items.length === 0) {
+      return '<div class="note-lines">조건에 맞는 과제가 없습니다.</div>';
+    }
+
+    return items
+      .map(
+        (assignment) => `
+          <article class="assignment-mobile-card ${teacherNeedsAttention(assignment) ? "attention" : ""}">
+            <div class="row row-between assignment-mobile-head">
+              <div>
+                <p class="assignment-mobile-title">${escapeHtml(assignment.student_name)}</p>
+                <p class="assignment-mobile-subtitle">${escapeHtml(assignment.source_name)}</p>
+              </div>
+              <span class="assignment-due-flag ${teacherNeedsAttention(assignment) ? "attention" : ""}">${escapeHtml(teacherDueCopy(assignment))}</span>
+            </div>
+            <div class="assignment-mobile-meta">
+              <p>
+                <strong>범위</strong>
+                <span>${escapeHtml(`${assignment.range_start_lesson}-${assignment.range_end_lesson} (${assignment.question_count}문항)`)}</span>
+              </p>
+              <p>
+                <strong>마감</strong>
+                <span>${escapeHtml(fmtDate(assignment.due_at))}</span>
+              </p>
+              <p>
+                <strong>ID</strong>
+                <span class="mono short-id">${escapeHtml(assignment.id.slice(0, 8))}</span>
+              </p>
+              <p>
+                <strong>상태</strong>
+                <span>${statusLabel(assignment.status)}</span>
+              </p>
+            </div>
+            ${teacherAssignmentStatusMarkup(assignment)}
+            ${teacherAssignmentActionsMarkup(assignment)}
+          </article>
+        `
+      )
+      .join("");
   }
 
   function fmtDate(v) {
@@ -425,6 +860,23 @@
     return `${pad2(minutes)}:${pad2(seconds)}`;
   }
 
+  function shouldAutoFocusStudentExamInput() {
+    return !window.matchMedia(EXAM_AUTOFOCUS_VIEWPORT_QUERY).matches && !window.matchMedia(COARSE_POINTER_QUERY).matches;
+  }
+
+  function focusStudentExamInput(input) {
+    if (!input || !shouldAutoFocusStudentExamInput()) return;
+
+    window.requestAnimationFrame(() => {
+      try {
+        input.focus({ preventScroll: true });
+      } catch {
+        input.focus();
+      }
+      input.select();
+    });
+  }
+
   function getStudentExamTimeLimitMs(questionCount) {
     const byQuestion = Math.max(1, Number(questionCount || 0)) * 60 * 1000;
     return Math.max(5 * 60 * 1000, Math.min(byQuestion, 20 * 60 * 1000));
@@ -498,20 +950,78 @@
   }
 
   function getPendingAssignment(items) {
-    return [...items]
-      .filter((i) => ["SCHEDULED", "PUBLISHED", "IN_PROGRESS"].includes(i.status))
-      .sort((a, b) => new Date(a.due_at) - new Date(b.due_at))[0];
+    return sortStudentAssignments(
+      items.filter((i) => ["SCHEDULED", "PUBLISHED", "IN_PROGRESS"].includes(i.status))
+    )[0];
   }
 
   function countByStatus(items, status) {
     return items.filter((x) => x.status === status).length;
   }
 
+  function studentAssignmentPriority(item) {
+    if (item.test_session_status === "IN_PROGRESS") return 0;
+    if (item.status === "PUBLISHED") return 1;
+    if (item.status === "SCHEDULED") return 2;
+    if (item.status === "MISSED") return 3;
+    if (item.test_session_status === "COMPLETED" || item.status === "COMPLETED") return 4;
+    return 5;
+  }
+
+  function sortStudentAssignments(items) {
+    return [...items]
+      .filter(Boolean)
+      .sort((a, b) => {
+        const priorityDiff = studentAssignmentPriority(a) - studentAssignmentPriority(b);
+        if (priorityDiff !== 0) return priorityDiff;
+        return new Date(a.due_at) - new Date(b.due_at);
+      });
+  }
+
+  function studentPrimaryActionLabel(item) {
+    if (item.test_session_status === "IN_PROGRESS") return "이어서 집중하기";
+    if (item.test_session_id) return "지금 5분 집중하기";
+    if (item.status === "SCHEDULED") return "열릴 때까지 기다리는 중";
+    return "시험 준비중";
+  }
+
+  function studentAssignmentSupportCopy(item) {
+    if (item.test_session_status === "IN_PROGRESS") {
+      return "저장된 답안 그대로 이어집니다. 지금 한 문제씩 차분하게 마무리하면 됩니다.";
+    }
+
+    if (item.test_session_id && item.status === "PUBLISHED") {
+      return "오늘 가장 먼저 끝내면 좋은 과제입니다. 시험 후에는 결과와 오답 복습으로 바로 이어집니다.";
+    }
+
+    if (item.status === "SCHEDULED") {
+      return "정해진 시각이 되면 바로 열립니다. 지금은 범위만 가볍게 확인해 두면 충분합니다.";
+    }
+
+    if (item.status === "MISSED") {
+      return "놓친 과제입니다. 다시 시작해도 늦지 않으니 가장 짧은 범위부터 회복해 봅시다.";
+    }
+
+    return "다음 학습 흐름이 자연스럽게 이어지도록 필요한 과제를 먼저 보여줍니다.";
+  }
+
+  function studentQueueLabel(item) {
+    if (item.test_session_status === "IN_PROGRESS") return "이어 풀기";
+    if (item.status === "PUBLISHED") return "다음 우선순위";
+    if (item.status === "SCHEDULED") return "곧 열릴 과제";
+    if (item.status === "MISSED") return "다시 챙기기";
+    if (item.test_session_status === "COMPLETED") return "최근 완료";
+    return "과제";
+  }
+
   async function renderStudentDashboard() {
     clearStudentExamTimer();
+    renderViewSkeleton(studentView, "student");
     const data = await api("/students/me/dashboard");
     const items = data.items || [];
     const pending = getPendingAssignment(items);
+    const sortedItems = sortStudentAssignments(items);
+    const remainingItems = sortedItems.filter((item) => item.id !== pending?.id);
 
     const kpis = {
       total: items.length,
@@ -520,22 +1030,75 @@
       completed: items.filter((i) => i.test_session_status === "COMPLETED").length,
     };
 
-    const cards = items
+    const primaryCard = pending
+      ? `
+        <section class="paper student-focus-card">
+          <div class="row row-between student-focus-head">
+            <div>
+              <p class="student-focus-kicker">${pending.test_session_status === "IN_PROGRESS" ? "Resume Mode" : "Today's Task"}</p>
+              <h2 class="student-focus-title">${escapeHtml(pending.source_name)}</h2>
+            </div>
+            ${statusBadge(pending.status)}
+          </div>
+          <p class="student-focus-copy">${studentAssignmentSupportCopy(pending)}</p>
+          <div class="student-focus-stats">
+            <article class="student-focus-stat">
+              <p class="meta">배정</p>
+              <strong>${escapeHtml(fmtDate(pending.publish_at))}</strong>
+            </article>
+            <article class="student-focus-stat">
+              <p class="meta">마감</p>
+              <strong>${escapeHtml(fmtDate(pending.due_at))}</strong>
+            </article>
+            <article class="student-focus-stat">
+              <p class="meta">범위</p>
+              <strong>Lesson ${escapeHtml(`${pending.range_start_lesson}-${pending.range_end_lesson}`)}</strong>
+            </article>
+            <article class="student-focus-stat">
+              <p class="meta">문항</p>
+              <strong>${escapeHtml(`${pending.question_count}문항`)}</strong>
+            </article>
+          </div>
+          <div class="row student-focus-actions">
+            ${
+              pending.test_session_id
+                ? `<button class="btn btn-warm" data-action="open-session" data-session-id="${pending.test_session_id}">${studentPrimaryActionLabel(pending)}</button>`
+                : `<button class="btn btn-quiet" type="button" disabled>${studentPrimaryActionLabel(pending)}</button>`
+            }
+            ${
+              pending.test_session_status === "COMPLETED"
+                ? `<span class="badge done">점수 ${pending.score ?? 0}/100</span>`
+                : `<span class="badge">${escapeHtml(studentQueueLabel(pending))}</span>`
+            }
+          </div>
+        </section>
+      `
+      : `
+        <section class="paper student-focus-card student-focus-card-empty">
+          <p class="student-focus-kicker">Today's Task</p>
+          <h2 class="student-focus-title">지금 바로 시작할 과제가 없습니다.</h2>
+          <p class="student-focus-copy">오늘 해야 할 과제를 모두 정리했습니다. 최근 결과를 복습하거나 다음 배정을 기다리면 됩니다.</p>
+        </section>
+      `;
+
+    const secondaryCards = remainingItems
       .map((item) => {
         const hasSession = Boolean(item.test_session_id);
-        const isPriority = pending && pending.id === item.id;
-        const actionLabel = item.test_session_status === "IN_PROGRESS" ? "집중 화면으로 복귀" : "집중 시험 시작";
+        const actionLabel = item.test_session_status === "IN_PROGRESS" ? "이어서 풀기" : "집중 시험 시작";
 
         return `
-          <article class="card ${isPriority ? "priority" : ""}">
+          <article class="card student-queue-card ${item.status === "MISSED" ? "priority" : ""}">
             <div class="row row-between">
-              <h3>${isPriority ? "우선 과제" : "과제"}</h3>
+              <div>
+                <p class="student-queue-label">${studentQueueLabel(item)}</p>
+                <p class="student-queue-title">${escapeHtml(item.source_name)}</p>
+              </div>
               ${statusBadge(item.status)}
             </div>
             <p class="meta">배정: ${fmtDate(item.publish_at)} | 마감: ${fmtDate(item.due_at)}</p>
             <p class="meta">범위: Lesson ${item.range_start_lesson}-${item.range_end_lesson} / ${item.question_count}문항</p>
             <div class="row">
-              ${hasSession ? `<button class="btn" data-action="open-session" data-session-id="${item.test_session_id}">${actionLabel}</button>` : `<button class="btn btn-quiet" disabled>시험 준비중</button>`}
+              ${hasSession ? `<button class="btn btn-quiet" data-action="open-session" data-session-id="${item.test_session_id}">${actionLabel}</button>` : `<button class="btn btn-quiet" type="button" disabled>시험 준비중</button>`}
               ${item.test_session_status === "COMPLETED" ? `<span class="badge done">점수 ${item.score ?? 0}/100</span>` : ""}
             </div>
           </article>
@@ -545,10 +1108,11 @@
 
     studentView.innerHTML = `
       ${studentResultSummaryMarkup()}
+      ${primaryCard}
       <section class="paper">
         <div class="paper-head">
           <h2>학생 숙제 대시보드</h2>
-          <p>지금 해야 할 숙제가 가장 먼저 보이도록 정렬되며, 시험은 별도 집중 화면에서 열립니다.</p>
+          <p>오늘 해야 할 한 가지를 먼저 보여주고, 나머지 과제는 이어서 확인할 수 있게 정리했습니다.</p>
         </div>
         <div class="kpi-grid">
           <article class="kpi"><p class="kpi-label">전체 과제</p><p class="kpi-value">${kpis.total}</p></article>
@@ -556,7 +1120,11 @@
           <article class="kpi"><p class="kpi-label">완료</p><p class="kpi-value">${kpis.completed}</p></article>
           <article class="kpi danger"><p class="kpi-label">미완료 누적</p><p class="kpi-value">${kpis.missed}</p></article>
         </div>
-        <div class="stack">${cards || `<p>현재 배정된 과제가 없습니다.</p>`}</div>
+        <div class="paper-head student-secondary-head">
+          <h2>이어서 볼 과제</h2>
+          <p>주과제 다음 순서로 정리된 과제들입니다.</p>
+        </div>
+        <div class="student-queue-grid">${secondaryCards || `<div class="note-lines">현재 추가로 확인할 과제가 없습니다.</div>`}</div>
       </section>
     `;
 
@@ -738,7 +1306,7 @@
             ${jumpButtons}
           </div>
 
-          <div class="row row-between exam-actions">
+          <div class="row row-between exam-actions exam-actions-primary">
             <div class="row">
               <button id="prevQuestionBtn" class="btn btn-quiet" type="button" ${safeIndex === 0 ? "disabled" : ""}>이전</button>
               <button id="nextQuestionBtn" class="btn btn-quiet" type="button" ${safeIndex === questions.length - 1 ? "disabled" : ""}>다음</button>
@@ -750,8 +1318,7 @@
     `;
 
     const answerInput = document.getElementById("studentAnswerInput");
-    answerInput.focus();
-    answerInput.select();
+    focusStudentExamInput(answerInput);
     mountStudentExamTimer();
     answerInput.addEventListener("input", (e) => {
       state.studentExam.answers[current.id] = e.target.value;
@@ -1045,15 +1612,15 @@
               .map((a) => {
                 const actionButtons = [];
                 if (!a.test_session_id) {
-                  actionButtons.push(`<button class="mini-btn" data-act="generate" data-assignment-id="${a.id}">생성</button>`);
+                  actionButtons.push(`<button class="mini-btn" type="button" data-act="generate" data-assignment-id="${a.id}">생성</button>`);
                 }
                 if (a.status === "SCHEDULED") {
-                  actionButtons.push(`<button class="mini-btn" data-act="publish" data-assignment-id="${a.id}">게시</button>`);
+                  actionButtons.push(`<button class="mini-btn" type="button" data-act="publish" data-assignment-id="${a.id}">게시</button>`);
                 }
                 if (a.test_session_id) {
-                  actionButtons.push(`<button class="mini-btn" data-act="edit" data-session-id="${a.test_session_id}">편집</button>`);
+                  actionButtons.push(`<button class="mini-btn" type="button" data-act="edit" data-session-id="${a.test_session_id}">편집</button>`);
                   if (a.test_session_status === "COMPLETED") {
-                    actionButtons.push(`<button class="mini-btn" data-act="supplement" data-session-id="${a.test_session_id}">보충</button>`);
+                    actionButtons.push(`<button class="mini-btn" type="button" data-act="supplement" data-session-id="${a.test_session_id}">보충</button>`);
                   }
                 }
 
@@ -1066,7 +1633,7 @@
                     <p class="meta">${a.source_name}</p>
                     <p class="meta">마감 ${new Date(a.due_at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false })}</p>
                     <p class="meta">L${a.range_start_lesson}-${a.range_end_lesson} / ${a.question_count}문항</p>
-                    <div class="row">${actionButtons.join("")}</div>
+                    <div class="calendar-item-actions">${actionButtons.join("")}</div>
                   </article>
                 `;
               })
@@ -1089,6 +1656,9 @@
   }
 
   async function renderTeacher(forceFetch = true) {
+    syncTeacherViewModeForViewport();
+    renderViewSkeleton(teacherView, "teacher");
+
     if (forceFetch || !state.teacherMeta) {
       state.teacherMeta = await api("/teacher/meta");
     }
@@ -1112,10 +1682,10 @@
       state.teacherSettings = settingsRes;
     }
 
-    drawTeacherView();
+    renderTeacherBoard();
   }
 
-  function drawTeacherView() {
+  function legacyDrawTeacherView() {
     const meta = state.teacherMeta;
     const activeTeacherId = getBoardTeacherId(meta);
     const activeTeacher = meta?.teachers?.find((teacher) => teacher.id === activeTeacherId) || null;
@@ -1124,6 +1694,30 @@
     const calendar = teacherCalendarMarkup(items);
     const showCalendar = state.teacherViewMode === "BOTH" || state.teacherViewMode === "CALENDAR";
     const showList = state.teacherViewMode === "BOTH" || state.teacherViewMode === "LIST";
+    const assignmentRows =
+      items.length > 0
+        ? items
+            .map(
+              (a) => `
+                <tr>
+                  <td><span class="mono short-id">${a.id.slice(0, 8)}</span></td>
+                  <td>${a.student_name}</td>
+                  <td>${a.range_start_lesson}-${a.range_end_lesson} (${a.question_count}문항)</td>
+                  <td>${statusBadge(a.status)}</td>
+                  <td>${fmtDate(a.due_at)}</td>
+                  <td>${a.test_session_id ? `<span class="badge">${a.test_session_status}</span>` : `<span class="badge">없음</span>`}</td>
+                  <td>${teacherAssignmentActionsMarkup(a)}</td>
+                </tr>
+              `
+            )
+            .join("")
+        : `
+            <tr>
+              <td colspan="7">
+                <div class="note-lines">조건에 맞는 과제가 없습니다.</div>
+              </td>
+            </tr>
+          `;
     const settingsDefinitions = state.teacherSettings?.definitions || {};
     const settingsValues = state.teacherSettings?.values || {};
     const defaultDueHours = getDefaultDueHours();
@@ -1174,9 +1768,18 @@
         </div>
       `
       : "학생을 선택하고 링크를 생성하면 QR과 URL이 여기에 표시됩니다.";
+    const teacherQuickNav = `
+      <nav class="teacher-mobile-nav" aria-label="교사 화면 빠른 이동">
+        <a class="mini-btn" href="#teacher-create-section">생성</a>
+        <a class="mini-btn" href="#teacher-assignments-section">목록</a>
+        <a class="mini-btn" href="#teacher-links-section">링크</a>
+        <a class="mini-btn" href="#teacher-override-section">편집</a>
+        <a class="mini-btn" href="#teacher-offline-section">오프라인</a>
+      </nav>
+    `;
 
     teacherView.innerHTML = `
-      <section class="paper">
+      <section class="paper anchor-target" id="teacher-create-section">
         <div class="paper-head">
           <h2>${state.role === "ADMIN" ? "관리자 운영 보드" : "교사용 자동화 보드"}</h2>
           <p>과제 운영, 자동화 설정, 링크 로그인, 오프라인 대리 입력을 한 화면에서 처리합니다.</p>
@@ -1189,6 +1792,7 @@
           <article class="kpi"><p class="kpi-label">완료</p><p class="kpi-value">${stats.completed}</p></article>
           <article class="kpi danger"><p class="kpi-label">미완료</p><p class="kpi-value">${stats.missed}</p></article>
         </div>
+        ${teacherQuickNav}
 
         <form id="createAssignmentForm" class="assignment-form">
           ${
@@ -1286,7 +1890,7 @@
         </div>
       </section>
 
-      <section class="paper">
+      <section class="paper anchor-target" id="teacher-assignments-section">
         <div class="paper-head">
           <h2>과제 목록</h2>
           <p>필터로 빠르게 찾고, 바로 조치하세요.</p>
@@ -1315,7 +1919,7 @@
             <button class="btn btn-quiet" type="button" id="teacherWeekPrevBtn">이전 주</button>
             <button class="btn btn-quiet" type="button" id="teacherWeekTodayBtn">이번 주</button>
             <button class="btn btn-quiet" type="button" id="teacherWeekNextBtn">다음 주</button>
-            <span class="mono">${calendar.range}</span>
+            <span class="mono calendar-range">${calendar.range}</span>
           </div>
           <div class="row">
             <button class="btn btn-quiet ${state.teacherViewMode === "BOTH" ? "active-toggle" : ""}" type="button" data-view-mode="BOTH">통합</button>
@@ -1326,6 +1930,10 @@
 
         <div class="${showCalendar ? "" : "hidden"}">
           ${calendar.html}
+        </div>
+
+        <div class="assignment-mobile-list ${showList ? "" : "hidden"}">
+          ${teacherAssignmentMobileCardsMarkup(items)}
         </div>
 
         <div class="table-wrap ${showList ? "" : "hidden"}">
@@ -1341,39 +1949,13 @@
                 <th>작업</th>
               </tr>
             </thead>
-            <tbody>
-              ${items
-                .map(
-                  (a) => `
-                <tr>
-                  <td><span class="mono short-id">${a.id.slice(0, 8)}</span></td>
-                  <td>${a.student_name}</td>
-                  <td>${a.range_start_lesson}-${a.range_end_lesson} (${a.question_count}문항)</td>
-                  <td>${statusBadge(a.status)}</td>
-                  <td>${fmtDate(a.due_at)}</td>
-                  <td>${a.test_session_id ? `<span class="badge">${a.test_session_status}</span>` : `<span class="badge">없음</span>`}</td>
-                  <td>
-                    <div class="row">
-                      <button class="btn btn-quiet" data-act="generate" data-assignment-id="${a.id}">생성</button>
-                      <button class="btn btn-quiet" data-act="publish" data-assignment-id="${a.id}">즉시게시</button>
-                      <button class="btn btn-quiet" data-act="export" data-assignment-id="${a.id}">엑셀</button>
-                      <button class="btn btn-quiet" data-act="copy" data-assignment-id="${a.id}">ID복사</button>
-                      ${a.test_session_id ? `<button class="btn btn-quiet" data-act="edit" data-session-id="${a.test_session_id}">문항편집</button>` : ""}
-                      ${a.test_session_id && a.test_session_status !== "COMPLETED" ? `<button class="btn btn-quiet" data-act="offline" data-session-id="${a.test_session_id}">오프라인입력</button>` : ""}
-                      ${a.test_session_id && a.test_session_status === "COMPLETED" ? `<button class="btn btn-quiet" data-act="supplement" data-session-id="${a.test_session_id}">보충문제</button>` : ""}
-                    </div>
-                  </td>
-                </tr>
-              `
-                )
-                .join("")}
-            </tbody>
+            <tbody>${assignmentRows}</tbody>
           </table>
         </div>
       </section>
 
       <section class="split">
-        <article class="paper">
+        <article class="paper anchor-target" id="teacher-links-section">
           <div class="paper-head">
             <h2>빠른 접속 링크 / QR</h2>
             <p>학생 기기에서 비밀번호 없이 접속할 수 있는 일회성 링크를 발급합니다.</p>
@@ -1453,7 +2035,7 @@
           </form>
         </article>
 
-        <article class="paper">
+        <article class="paper anchor-target" id="teacher-override-section">
           <div class="paper-head">
             <h2>문항 수동 오버라이드</h2>
             <p>세션 선택 후 문항을 즉시 수정할 수 있습니다.</p>
@@ -1462,7 +2044,7 @@
         </article>
       </section>
 
-      <section class="paper">
+      <section class="paper anchor-target" id="teacher-offline-section">
         <div class="paper-head">
           <h2>오프라인 대리 입력</h2>
           <p>종이 시험, 구두 시험, 전화 확인 결과를 교사 또는 관리자가 학생 계정으로 반영합니다.</p>
@@ -1473,6 +2055,481 @@
 
     bindTeacherEvents();
     renderTeacherOverride();
+    renderTeacherOfflineEntry();
+  }
+
+  function buildTeacherStats(items) {
+    return {
+      total: items.length,
+      needsAttention: items.filter(teacherNeedsAttention).length,
+      ungenerated: items.filter((item) => !item.test_session_id).length,
+      dueToday: items.filter((item) => isTodayLocal(item.due_at) && item.test_session_status !== "COMPLETED").length,
+      inProgress: items.filter((item) => item.status === "IN_PROGRESS" || item.test_session_status === "IN_PROGRESS").length,
+      completed: items.filter((item) => item.status === "COMPLETED" || item.test_session_status === "COMPLETED").length,
+      missed: items.filter((item) => item.status === "MISSED").length,
+      readyToPublish: items.filter(teacherPublishReady).length,
+    };
+  }
+
+  function teacherFilterLabel(filter) {
+    const labels = {
+      ALL: "전체",
+      NEEDS_ACTION: "먼저 처리할 과제",
+      UNGENERATED: "시험지 미생성",
+      DUE_TODAY: "오늘 마감",
+      SCHEDULED: "배정 예정",
+      PUBLISHED: "배부됨",
+      IN_PROGRESS: "응시 중",
+      COMPLETED: "완료",
+      MISSED: "놓침",
+    };
+    return labels[filter] || filter;
+  }
+
+  function matchesTeacherFilter(assignment, filter) {
+    if (filter === "ALL") return true;
+    if (filter === "NEEDS_ACTION") return teacherNeedsAttention(assignment);
+    if (filter === "UNGENERATED") return !assignment.test_session_id;
+    if (filter === "DUE_TODAY") return isTodayLocal(assignment.due_at) && assignment.test_session_status !== "COMPLETED";
+    return assignment.status === filter;
+  }
+
+  function getFilteredTeacherAssignments() {
+    const keyword = state.teacherFilters.keyword.trim().toLowerCase();
+    return [...state.teacherAssignments]
+      .filter((assignment) => {
+        const okStatus = matchesTeacherFilter(assignment, state.teacherFilters.status);
+        const okKeyword = keyword
+          ? [assignment.student_name, assignment.source_name, assignment.id].join(" ").toLowerCase().includes(keyword)
+          : true;
+        return okStatus && okKeyword;
+      })
+      .sort((left, right) => {
+        const priorityDiff = teacherPriorityScore(left) - teacherPriorityScore(right);
+        if (priorityDiff !== 0) return priorityDiff;
+        return new Date(left.due_at) - new Date(right.due_at);
+      });
+  }
+
+  function getTeacherPriorityAssignments(items) {
+    return [...items]
+      .filter((assignment) => {
+        if (teacherNeedsAttention(assignment)) return true;
+        return assignment.status === "PUBLISHED" || assignment.status === "IN_PROGRESS" || assignment.test_session_status === "COMPLETED";
+      })
+      .sort((left, right) => {
+        const priorityDiff = teacherPriorityScore(left) - teacherPriorityScore(right);
+        if (priorityDiff !== 0) return priorityDiff;
+        return new Date(left.due_at) - new Date(right.due_at);
+      })
+      .slice(0, 6);
+  }
+
+  function teacherOverviewCardsMarkup(stats) {
+    return `
+      <button class="teacher-overview-card warm" type="button" data-filter-preset="NEEDS_ACTION">
+        <span class="teacher-overview-label">즉시 조치</span>
+        <strong>${stats.needsAttention}</strong>
+        <small>생성, 배부, 놓친 과제를 먼저 봅니다.</small>
+      </button>
+      <button class="teacher-overview-card" type="button" data-filter-preset="UNGENERATED">
+        <span class="teacher-overview-label">시험지 미생성</span>
+        <strong>${stats.ungenerated}</strong>
+        <small>문제를 아직 만들지 않은 과제입니다.</small>
+      </button>
+      <button class="teacher-overview-card" type="button" data-filter-preset="DUE_TODAY">
+        <span class="teacher-overview-label">오늘 마감</span>
+        <strong>${stats.dueToday}</strong>
+        <small>오늘 안에 확인이 끝나야 하는 과제입니다.</small>
+      </button>
+      <button class="teacher-overview-card" type="button" data-filter-preset="IN_PROGRESS">
+        <span class="teacher-overview-label">응시 중</span>
+        <strong>${stats.inProgress}</strong>
+        <small>현재 학생이 풀고 있는 시험입니다.</small>
+      </button>
+      <button class="teacher-overview-card danger" type="button" data-filter-preset="MISSED">
+        <span class="teacher-overview-label">놓친 과제</span>
+        <strong>${stats.missed}</strong>
+        <small>보충 또는 오프라인 반영이 필요한 과제입니다.</small>
+      </button>
+    `;
+  }
+
+  function teacherPriorityCardsMarkup(items) {
+    if (items.length === 0) {
+      return '<div class="note-lines">지금 바로 조치할 과제가 없습니다. 오늘 운영은 안정적인 상태입니다.</div>';
+    }
+
+    return items
+      .map((assignment) => {
+        const primary = teacherPrimaryAction(assignment);
+        const primaryButton = teacherActionButtonMarkup(primary.type, assignment, primary.label, primary.style);
+        return `
+          <article class="card teacher-priority-card ${teacherNeedsAttention(assignment) ? "priority" : ""}">
+            <div class="row row-between">
+              <div>
+                <p class="teacher-priority-kicker">${escapeHtml(teacherDueCopy(assignment))}</p>
+                <h3 class="teacher-priority-title">${escapeHtml(assignment.student_name)}</h3>
+              </div>
+              <span class="assignment-due-flag ${teacherNeedsAttention(assignment) ? "attention" : ""}">${escapeHtml(statusLabel(assignment.status))}</span>
+            </div>
+            <p class="teacher-priority-source">${escapeHtml(assignment.source_name)}</p>
+            <p class="meta">범위 ${escapeHtml(`${assignment.range_start_lesson}-${assignment.range_end_lesson}`)} / ${escapeHtml(`${assignment.question_count}문항`)}</p>
+            <p class="meta">마감 ${escapeHtml(fmtDate(assignment.due_at))}</p>
+            <p class="teacher-priority-copy">${escapeHtml(primary.note)}</p>
+            <div class="teacher-priority-footer">
+              ${primaryButton || `<div class="assignment-inline-note compact"><strong>${escapeHtml(primary.label)}</strong><span>${escapeHtml(primary.note)}</span></div>`}
+              <a class="mini-btn" href="#teacher-assignments-section">목록에서 보기</a>
+            </div>
+          </article>
+        `;
+      })
+      .join("");
+  }
+
+  function teacherCalendarBoardMarkup(items) {
+    const weekDates = getTeacherWeekDates();
+    const byDay = new Map(weekDates.map((day) => [dateKeyLocal(day), []]));
+
+    for (const item of items) {
+      const key = dateKeyLocal(item.due_at);
+      if (byDay.has(key)) byDay.get(key).push(item);
+    }
+
+    for (const dayItems of byDay.values()) {
+      dayItems.sort((left, right) => new Date(left.due_at) - new Date(right.due_at));
+    }
+
+    const columns = weekDates
+      .map((day) => {
+        const key = dateKeyLocal(day);
+        const dayItems = byDay.get(key) || [];
+        const cards = dayItems.length
+          ? dayItems
+              .map((assignment) => {
+                const primary = teacherPrimaryAction(assignment);
+                const primaryButton = teacherActionButtonMarkup(primary.type, assignment, primary.label, "mini-btn");
+                return `
+                  <article class="calendar-item ${teacherNeedsAttention(assignment) ? "priority" : ""}">
+                    <div class="row row-between">
+                      <strong>${escapeHtml(assignment.student_name)}</strong>
+                      ${statusBadge(assignment.status)}
+                    </div>
+                    <p class="meta">${escapeHtml(assignment.source_name)}</p>
+                    <p class="meta">마감 ${new Date(assignment.due_at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false })}</p>
+                    <p class="meta">${escapeHtml(teacherAssignmentSituation(assignment))}</p>
+                    <div class="calendar-item-actions">
+                      ${primaryButton || `<span class="mini-btn static">${escapeHtml(primary.label)}</span>`}
+                    </div>
+                  </article>
+                `;
+              })
+              .join("")
+          : '<p class="calendar-empty">일정 없음</p>';
+
+        return `
+          <section class="calendar-col">
+            <header class="calendar-col-head">${fmtDay(day)}</header>
+            <div class="calendar-col-body">${cards}</div>
+          </section>
+        `;
+      })
+      .join("");
+
+    return {
+      range: weekRangeText(weekDates),
+      html: `<div class="calendar-grid">${columns}</div>`,
+    };
+  }
+
+  function openTeacherToolPanel(panelId) {
+    const panel = document.getElementById(panelId);
+    if (!panel) return;
+    panel.open = true;
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function renderTeacherBoard() {
+    const meta = state.teacherMeta;
+    const activeTeacherId = getBoardTeacherId(meta);
+    const activeTeacher = meta?.teachers?.find((teacher) => teacher.id === activeTeacherId) || null;
+    const allItems = [...state.teacherAssignments];
+    const items = getFilteredTeacherAssignments();
+    const stats = buildTeacherStats(allItems);
+    const priorityItems = getTeacherPriorityAssignments(allItems);
+    const calendar = teacherCalendarBoardMarkup(items);
+    const showCalendar = state.teacherViewMode === "BOTH" || state.teacherViewMode === "CALENDAR";
+    const showList = state.teacherViewMode === "BOTH" || state.teacherViewMode === "LIST";
+    const settingsDefinitions = state.teacherSettings?.definitions || {};
+    const settingsValues = state.teacherSettings?.values || {};
+    const defaultDueHours = getDefaultDueHours();
+    const defaultPublishAt = toInputDateTime(new Date().toISOString());
+    const defaultDueAt = buildDueAtInputValue(defaultPublishAt, defaultDueHours);
+    const defaultSupplementQuestions = Number(getTeacherSettingsValue("supplement_max_questions", 10));
+    const defaultSupplementDueHours = Number(getTeacherSettingsValue("supplement_due_hours", 24));
+
+    const assignmentRows =
+      items.length > 0
+        ? items
+            .map(
+              (assignment) => `
+                <tr>
+                  <td>
+                    <strong>${escapeHtml(assignment.student_name)}</strong>
+                    <p class="meta">${escapeHtml(assignment.source_name)}</p>
+                    <p class="meta mono short-id">${escapeHtml(assignment.id.slice(0, 8))}</p>
+                  </td>
+                  <td>
+                    <strong>Lesson ${escapeHtml(`${assignment.range_start_lesson}-${assignment.range_end_lesson}`)}</strong>
+                    <p class="meta">${escapeHtml(`${assignment.question_count}문항`)}</p>
+                  </td>
+                  <td>${teacherAssignmentStatusMarkup(assignment)}</td>
+                  <td>
+                    <strong>${escapeHtml(fmtDate(assignment.due_at))}</strong>
+                    <p class="meta">${escapeHtml(teacherDueCopy(assignment))}</p>
+                  </td>
+                  <td>${teacherAssignmentActionsMarkup(assignment)}</td>
+                </tr>
+              `
+            )
+            .join("")
+        : `
+            <tr>
+              <td colspan="5">
+                <div class="note-lines">조건에 맞는 과제가 없습니다.</div>
+              </td>
+            </tr>
+          `;
+
+    const settingsFields = teacherSettingsFieldOrder()
+      .map((key) => {
+        const definition = settingsDefinitions[key];
+        if (!definition) return "";
+
+        if (definition.type === "boolean") {
+          return `
+            <label class="setting-card setting-toggle">
+              <span class="setting-copy">
+                <strong>${escapeHtml(definition.label)}</strong>
+                <small>${escapeHtml(definition.description || "")}</small>
+              </span>
+              <input type="checkbox" name="${key}" ${settingsValues[key] ? "checked" : ""} />
+            </label>
+          `;
+        }
+
+        return `
+          <label class="setting-card">
+            <span class="setting-label">${escapeHtml(definition.label)}</span>
+            <input type="number" name="${key}" min="${definition.min ?? 0}" value="${escapeHtml(settingsValues[key] ?? "")}" required />
+            <small class="setting-desc">${escapeHtml(definition.description || "")}</small>
+          </label>
+        `;
+      })
+      .join("");
+
+    const accessLinkResult = state.teacherAccessLink
+      ? `
+        <div class="access-link-result">
+          <p class="meta">대상 학생</p>
+          <p><strong>${escapeHtml(state.teacherAccessLink.target?.name || "선택한 학생")}</strong></p>
+          <p class="meta">만료 시각: ${fmtDate(state.teacherAccessLink.expiresAt)}</p>
+          <label>
+            접속 링크
+            <input type="text" id="generatedAccessLinkInput" value="${escapeHtml(state.teacherAccessLink.loginUrl)}" readonly />
+          </label>
+          <div class="row">
+            <button class="btn btn-quiet" type="button" id="copyAccessLinkBtn">링크 복사</button>
+            <button class="btn btn-quiet" type="button" id="openAccessLinkBtn">새 창 열기</button>
+          </div>
+          <div class="qr-card">${state.teacherAccessLink.qrSvg}</div>
+          <p class="meta">학생은 링크 클릭 또는 QR 스캔만으로 바로 로그인합니다.</p>
+        </div>
+      `
+      : '<div class="note-lines">학생을 선택하고 링크를 만들면 QR과 URL이 여기 표시됩니다.</div>';
+
+    const teacherQuickNav = `
+      <nav class="teacher-mobile-nav" aria-label="교사 화면 빠른 이동">
+        <a class="mini-btn" href="#teacher-priority-section">우선 조치</a>
+        <a class="mini-btn" href="#teacher-assignments-section">과제 보기</a>
+        <a class="mini-btn" href="#teacher-create-section">새 과제</a>
+        <a class="mini-btn" href="#teacher-settings-section">자동화</a>
+        <a class="mini-btn" href="#teacher-tools-section">도구함</a>
+      </nav>
+    `;
+
+    teacherView.innerHTML = `
+      <section class="paper teacher-priority-board anchor-target" id="teacher-priority-section">
+        <div class="paper-head">
+          <h2>${escapeHtml(activeTeacher?.name || "현재 교사")} 선생님의 오늘 운영</h2>
+          <p>학생 운영에서 먼저 처리해야 할 일만 위로 끌어올렸습니다. 지금 바로 조치할 과제부터 보세요.</p>
+        </div>
+        <div class="teacher-overview-grid">
+          ${teacherOverviewCardsMarkup(stats)}
+        </div>
+        ${teacherQuickNav}
+        <div class="teacher-priority-grid">
+          ${teacherPriorityCardsMarkup(priorityItems)}
+        </div>
+      </section>
+
+      <section class="paper anchor-target" id="teacher-assignments-section">
+        <div class="paper-head">
+          <h2>예외 중심 과제 목록</h2>
+          <p>필터를 바꾸면 학생별 상황과 다음 행동을 바로 볼 수 있습니다.</p>
+        </div>
+        <div class="table-tools">
+          <label>
+            보기 기준
+            <select id="teacherStatusFilter">
+              <option value="ALL" ${state.teacherFilters.status === "ALL" ? "selected" : ""}>${teacherFilterLabel("ALL")}</option>
+              <option value="NEEDS_ACTION" ${state.teacherFilters.status === "NEEDS_ACTION" ? "selected" : ""}>${teacherFilterLabel("NEEDS_ACTION")}</option>
+              <option value="UNGENERATED" ${state.teacherFilters.status === "UNGENERATED" ? "selected" : ""}>${teacherFilterLabel("UNGENERATED")}</option>
+              <option value="DUE_TODAY" ${state.teacherFilters.status === "DUE_TODAY" ? "selected" : ""}>${teacherFilterLabel("DUE_TODAY")}</option>
+              <option value="SCHEDULED" ${state.teacherFilters.status === "SCHEDULED" ? "selected" : ""}>${teacherFilterLabel("SCHEDULED")}</option>
+              <option value="PUBLISHED" ${state.teacherFilters.status === "PUBLISHED" ? "selected" : ""}>${teacherFilterLabel("PUBLISHED")}</option>
+              <option value="IN_PROGRESS" ${state.teacherFilters.status === "IN_PROGRESS" ? "selected" : ""}>${teacherFilterLabel("IN_PROGRESS")}</option>
+              <option value="COMPLETED" ${state.teacherFilters.status === "COMPLETED" ? "selected" : ""}>${teacherFilterLabel("COMPLETED")}</option>
+              <option value="MISSED" ${state.teacherFilters.status === "MISSED" ? "selected" : ""}>${teacherFilterLabel("MISSED")}</option>
+            </select>
+          </label>
+          <label>
+            검색
+            <input id="teacherKeywordFilter" type="text" value="${escapeHtml(state.teacherFilters.keyword)}" placeholder="학생명, 소스명, assignment id" />
+          </label>
+        </div>
+        <div class="calendar-toolbar">
+          <div class="row">
+            <button class="btn btn-quiet" type="button" id="teacherWeekPrevBtn">이전 주</button>
+            <button class="btn btn-quiet" type="button" id="teacherWeekTodayBtn">이번 주</button>
+            <button class="btn btn-quiet" type="button" id="teacherWeekNextBtn">다음 주</button>
+            <span class="mono calendar-range">${calendar.range}</span>
+          </div>
+          <div class="row">
+            <button class="btn btn-quiet ${state.teacherViewMode === "BOTH" ? "active-toggle" : ""}" type="button" data-view-mode="BOTH">통합</button>
+            <button class="btn btn-quiet ${state.teacherViewMode === "CALENDAR" ? "active-toggle" : ""}" type="button" data-view-mode="CALENDAR">캘린더</button>
+            <button class="btn btn-quiet ${state.teacherViewMode === "LIST" ? "active-toggle" : ""}" type="button" data-view-mode="LIST">목록</button>
+          </div>
+        </div>
+        <div class="${showCalendar ? "" : "hidden"}">${calendar.html}</div>
+        <div class="assignment-mobile-list ${showList ? "" : "hidden"}">${teacherAssignmentMobileCardsMarkup(items)}</div>
+        <div class="table-wrap ${showList ? "" : "hidden"}">
+          <table>
+            <thead>
+              <tr>
+                <th>학생 / 과제</th>
+                <th>범위</th>
+                <th>현재 상황</th>
+                <th>마감</th>
+                <th>다음 행동</th>
+              </tr>
+            </thead>
+            <tbody>${assignmentRows}</tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="split teacher-management-split">
+        <article class="paper anchor-target" id="teacher-create-section">
+          <div class="paper-head">
+            <h2>새 과제 만들기</h2>
+            <p>새 배정을 만들 때 필요한 정보만 먼저 모았습니다.</p>
+          </div>
+          <form id="createAssignmentForm" class="assignment-form">
+            ${meta.canChooseTeacher ? `<label>담당 교사<select id="assignmentTeacherSelect" name="teacherId" required>${meta.teachers.map((teacher) => `<option value="${teacher.id}" ${teacher.id === activeTeacherId ? "selected" : ""}>${teacher.name}</option>`).join("")}</select></label>` : ""}
+            <label>학생<select name="studentId" required>${meta.students.map((student) => `<option value="${student.id}">${student.name} (${student.student_code})</option>`).join("")}</select></label>
+            <label>단어 소스<select name="sourceId" required>${meta.sources.map((source) => `<option value="${source.id}">${source.name} (${source.source_type}) / lesson ${source.min_lesson ?? "-"}-${source.max_lesson ?? "-"} / ${source.word_count} words</option>`).join("")}</select></label>
+            <label>시작 Lesson<input type="number" name="rangeStartLesson" min="1" value="1" required /></label>
+            <label>끝 Lesson<input type="number" name="rangeEndLesson" min="1" value="3" required /></label>
+            <label>문제 수<input type="number" name="questionCount" min="1" value="8" required /></label>
+            <label>배정 시각<input id="assignmentPublishAtInput" type="datetime-local" name="publishAt" value="${defaultPublishAt}" required /></label>
+            <label>마감 시각<input id="assignmentDueAtInput" type="datetime-local" name="dueAt" value="${defaultDueAt}" /></label>
+            <div class="row full">
+              <span class="badge">기본 마감: 게시 후 ${defaultDueHours}시간</span>
+              <button class="btn btn-quiet" type="button" id="applyDuePresetBtn">기본 마감 적용</button>
+              <button class="btn" type="submit">과제 생성</button>
+              <button class="btn btn-quiet" type="button" id="reloadTeacherBtn">동기화</button>
+            </div>
+          </form>
+        </article>
+
+        <article class="paper anchor-target" id="teacher-settings-section">
+          <div class="paper-head">
+            <h2>자동화 설정</h2>
+            <p>보충 기준, 기본 마감 시간, 알림 정책을 교사 운영 언어로 바로 조정합니다.</p>
+          </div>
+          <form id="teacherSettingsForm" class="settings-grid">
+            ${meta.canChooseTeacher ? `<label class="setting-card full"><span class="setting-label">설정 대상 교사</span><select id="teacherSettingsTeacherSelect" name="teacherId" required>${meta.teachers.map((teacher) => `<option value="${teacher.id}" ${teacher.id === activeTeacherId ? "selected" : ""}>${teacher.name}</option>`).join("")}</select><small class="setting-desc">선택한 교사 기준으로 과제 목록과 정책이 함께 바뀝니다.</small></label>` : `<div class="setting-card full setting-summary"><strong>${escapeHtml(activeTeacher?.name || "현재 교사")}</strong><small>현재 교사 기준 자동화 정책입니다.</small></div>`}
+            ${settingsFields}
+            <div class="row full settings-actions">
+              <button class="btn btn-warm" type="submit">설정 저장</button>
+              <span class="meta">이후 생성되는 과제와 자동화 흐름에 즉시 반영됩니다.</span>
+            </div>
+          </form>
+        </article>
+      </section>
+
+      <section class="paper anchor-target" id="teacher-tools-section">
+        <div class="paper-head">
+          <h2>운영 도구함</h2>
+          <p>링크 발급, 자료 반영, 문항 편집, 오프라인 입력, 보충 과제를 필요할 때만 펼쳐 사용합니다.</p>
+        </div>
+        <div class="tool-panel-stack">
+          <details id="teacherToolAccessLink" class="tool-panel" ${state.teacherAccessLink ? "open" : ""}>
+            <summary>빠른 접속 링크</summary>
+            <div class="tool-panel-body">
+              <form id="accessLinkForm" class="lined-form">
+                <label>학생<select name="userId" required>${meta.students.filter((student) => student.user_id).map((student) => `<option value="${student.user_id}">${student.name} (${student.student_code})</option>`).join("")}</select></label>
+                <label>링크 라벨<input type="text" name="label" value="학생 빠른 로그인" /></label>
+                <label>만료 시간(분)<input type="number" name="expiresInMinutes" min="1" max="1440" value="30" required /></label>
+                <button class="btn" type="submit">링크 / QR 생성</button>
+              </form>
+              <div id="teacherAccessLinkArea">${accessLinkResult}</div>
+            </div>
+          </details>
+
+          <details id="teacherToolImport" class="tool-panel">
+            <summary>자료 가져오기</summary>
+            <div class="tool-panel-body tool-panel-body-split">
+              <form id="xlsxImportForm" class="lined-form">
+                <label>Assignment ID<input type="text" name="assignmentId" placeholder="assignment_demo_1" required /></label>
+                <label>XLSX 파일<input type="file" name="file" accept=".xlsx" required /></label>
+                <button class="btn btn-warm" type="submit">엑셀 반영</button>
+              </form>
+              <form id="csvImportForm" class="lined-form">
+                ${meta.canChooseTeacher ? `<label>소유 교사<select name="teacherId" required>${meta.teachers.map((teacher) => `<option value="${teacher.id}" ${teacher.id === activeTeacherId ? "selected" : ""}>${teacher.name}</option>`).join("")}</select></label>` : ""}
+                <label>소스 이름<input type="text" name="name" value="새 단어장" required /></label>
+                <label>소스 타입<input type="text" name="sourceType" value="EBOOK_CSV" required /></label>
+                <label>CSV 파일<input type="file" name="file" accept=".csv" required /></label>
+                <button class="btn" type="submit">CSV 가져오기</button>
+              </form>
+            </div>
+          </details>
+
+          <details id="teacherToolOverride" class="tool-panel" ${state.teacherEditingSessionId ? "open" : ""}>
+            <summary>${state.teacherEditingSessionId ? `문항 편집 (${escapeHtml(state.teacherEditingSessionId.slice(0, 8))})` : "문항 편집"}</summary>
+            <div class="tool-panel-body"><div id="teacherOverrideArea" class="note-lines">과제 목록에서 문항 확인을 누르면 여기서 바로 수정할 수 있습니다.</div></div>
+          </details>
+
+          <details id="teacherToolSupplement" class="tool-panel" ${state.teacherSupplementSessionId ? "open" : ""}>
+            <summary>${state.teacherSupplementSessionId ? `보충 과제 (${escapeHtml(state.teacherSupplementSessionId.slice(0, 8))})` : "보충 과제"}</summary>
+            <div class="tool-panel-body">
+              <div id="teacherSupplementArea" class="note-lines">완료된 시험에서 보충 과제 만들기를 누르면 여기서 문항 수와 마감을 조정할 수 있습니다.</div>
+              <p class="meta tool-inline-hint">기본값: ${escapeHtml(`${defaultSupplementQuestions}문항 / ${defaultSupplementDueHours}시간`)}</p>
+            </div>
+          </details>
+
+          <details id="teacherToolOffline" class="tool-panel" ${state.teacherOfflineSessionId ? "open" : ""}>
+            <summary>${state.teacherOfflineSessionId ? `오프라인 입력 (${escapeHtml(state.teacherOfflineSessionId.slice(0, 8))})` : "오프라인 입력"}</summary>
+            <div class="tool-panel-body"><div id="teacherOfflineEntryArea" class="note-lines">과제 목록에서 오프라인 입력을 누르면 여기서 학생 답안을 반영할 수 있습니다.</div></div>
+          </details>
+        </div>
+      </section>
+    `;
+
+    bindTeacherEvents();
+    renderTeacherOverride();
+    renderTeacherSupplementEntry();
     renderTeacherOfflineEntry();
   }
 
@@ -1498,6 +2555,8 @@
       state.teacherOfflineSessionId = null;
       state.teacherOfflineQuestions = [];
       state.teacherOfflineContext = null;
+      state.teacherSupplementSessionId = null;
+      state.teacherSupplementContext = null;
       await renderTeacher(true);
     };
 
@@ -1523,33 +2582,42 @@
 
     document.getElementById("teacherStatusFilter").addEventListener("change", (e) => {
       state.teacherFilters.status = e.target.value;
-      drawTeacherView();
+      renderTeacherBoard();
     });
 
     document.getElementById("teacherKeywordFilter").addEventListener("input", (e) => {
       state.teacherFilters.keyword = e.target.value;
-      drawTeacherView();
+      renderTeacherBoard();
     });
 
     document.getElementById("teacherWeekPrevBtn").addEventListener("click", () => {
       state.teacherWeekOffset -= 1;
-      drawTeacherView();
+      renderTeacherBoard();
     });
 
     document.getElementById("teacherWeekTodayBtn").addEventListener("click", () => {
       state.teacherWeekOffset = 0;
-      drawTeacherView();
+      renderTeacherBoard();
     });
 
     document.getElementById("teacherWeekNextBtn").addEventListener("click", () => {
       state.teacherWeekOffset += 1;
-      drawTeacherView();
+      renderTeacherBoard();
     });
 
     document.querySelectorAll("[data-view-mode]").forEach((btn) => {
       btn.addEventListener("click", () => {
         state.teacherViewMode = btn.dataset.viewMode;
-        drawTeacherView();
+        state.teacherViewModeAuto = false;
+        renderTeacherBoard();
+      });
+    });
+
+    document.querySelectorAll("[data-filter-preset]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.teacherFilters.status = btn.dataset.filterPreset || "ALL";
+        renderTeacherBoard();
+        document.getElementById("teacher-assignments-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
       });
     });
 
@@ -1633,7 +2701,7 @@
           });
 
           state.teacherAccessLink = result;
-          drawTeacherView();
+          renderTeacherBoard();
           toast("학생 접속 링크를 생성했습니다.");
         } catch (err) {
           toast(err.message);
@@ -1722,6 +2790,7 @@
           state.teacherEditingSessionId = btn.dataset.sessionId;
           state.teacherQuestions = data.questions;
           renderTeacherOverride();
+          openTeacherToolPanel("teacherToolOverride");
         } catch (err) {
           toast(err.message);
         }
@@ -1737,6 +2806,7 @@
           state.teacherOfflineContext =
             state.teacherAssignments.find((assignment) => assignment.test_session_id === btn.dataset.sessionId) || null;
           renderTeacherOfflineEntry();
+          openTeacherToolPanel("teacherToolOffline");
         } catch (err) {
           toast(err.message);
         }
@@ -1744,25 +2814,12 @@
     });
 
     document.querySelectorAll("button[data-act='supplement']").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        try {
-          const questionCountInput = window.prompt("보충 문제 수(기본: 오답 개수)", "");
-          const dueHoursInput = window.prompt("보충 과제 마감 시간(시간 단위, 기본 24)", "24");
-
-          const payload = {};
-          if (questionCountInput && Number(questionCountInput) > 0) payload.questionCount = Number(questionCountInput);
-          if (dueHoursInput && Number(dueHoursInput) > 0) payload.dueHours = Number(dueHoursInput);
-
-          const result = await api(`/teacher/test-sessions/${btn.dataset.sessionId}/supplement`, {
-            method: "POST",
-            body: payload,
-          });
-
-          toast(`보충 과제 생성 완료 (${result.questionCount}문항)`);
-          await renderTeacher(true);
-        } catch (err) {
-          toast(err.message);
-        }
+      btn.addEventListener("click", () => {
+        state.teacherSupplementSessionId = btn.dataset.sessionId;
+        state.teacherSupplementContext =
+          state.teacherAssignments.find((assignment) => assignment.test_session_id === btn.dataset.sessionId) || null;
+        renderTeacherSupplementEntry();
+        openTeacherToolPanel("teacherToolSupplement");
       });
     });
 
@@ -1814,7 +2871,7 @@
     if (!area) return;
 
     if (!state.teacherEditingSessionId || state.teacherQuestions.length === 0) {
-      area.innerHTML = "문항편집 버튼을 눌러 시작하세요.";
+      area.innerHTML = "과제 목록에서 문항 확인을 누르면 여기서 바로 수정할 수 있습니다.";
       area.className = "note-lines";
       return;
     }
@@ -1849,6 +2906,7 @@
           .join("")}
         <div class="row">
           <button id="saveOverrideBtn" class="btn btn-warm">오버라이드 저장</button>
+          <button id="clearOverrideBtn" class="btn btn-quiet" type="button">닫기</button>
         </div>
       </div>
     `;
@@ -1873,6 +2931,96 @@
         toast(err.message);
       }
     });
+
+    document.getElementById("clearOverrideBtn").addEventListener("click", () => {
+      state.teacherEditingSessionId = null;
+      state.teacherQuestions = [];
+      renderTeacherOverride();
+      const panel = document.getElementById("teacherToolOverride");
+      if (panel) panel.open = false;
+    });
+  }
+
+  function renderTeacherSupplementEntry() {
+    const area = document.getElementById("teacherSupplementArea");
+    if (!area) return;
+
+    if (!state.teacherSupplementSessionId) {
+      area.innerHTML = "완료된 시험에서 보충 과제 만들기를 누르면 여기서 문항 수와 마감을 조정할 수 있습니다.";
+      area.className = "note-lines";
+      return;
+    }
+
+    const context = state.teacherSupplementContext;
+    const defaultQuestionCount = Number(getTeacherSettingsValue("supplement_max_questions", 10));
+    const defaultDueHours = Number(getTeacherSettingsValue("supplement_due_hours", 24));
+    area.className = "";
+    area.innerHTML = `
+      <div class="exam-sheet">
+        <div class="row row-between">
+          <div>
+            <p class="meta">Session</p>
+            <p class="mono">${escapeHtml(state.teacherSupplementSessionId)}</p>
+          </div>
+          <div>
+            <p class="meta">학생</p>
+            <p><strong>${escapeHtml(context?.student_name || "-")}</strong></p>
+          </div>
+          <div>
+            <p class="meta">상태</p>
+            <p>${statusBadge(context?.status || "COMPLETED")}</p>
+          </div>
+        </div>
+
+        <div class="settings-grid teacher-inline-form">
+          <label class="setting-card">
+            <span class="setting-label">보충 문제 수</span>
+            <input id="teacherSupplementQuestionCount" type="number" min="1" value="${escapeHtml(defaultQuestionCount)}" />
+            <small class="setting-desc">비우면 기본값으로 생성합니다.</small>
+          </label>
+          <label class="setting-card">
+            <span class="setting-label">마감 시간(시간)</span>
+            <input id="teacherSupplementDueHours" type="number" min="1" value="${escapeHtml(defaultDueHours)}" />
+            <small class="setting-desc">생성 후 몇 시간 뒤에 마감할지 정합니다.</small>
+          </label>
+        </div>
+
+        <div class="row">
+          <button id="submitSupplementBtn" class="btn btn-warm" type="button">보충 과제 생성</button>
+          <button id="clearSupplementBtn" class="btn btn-quiet" type="button">닫기</button>
+        </div>
+      </div>
+    `;
+
+    document.getElementById("submitSupplementBtn").addEventListener("click", async () => {
+      try {
+        const payload = {};
+        const questionCount = Number(document.getElementById("teacherSupplementQuestionCount").value);
+        const dueHours = Number(document.getElementById("teacherSupplementDueHours").value);
+        if (questionCount > 0) payload.questionCount = questionCount;
+        if (dueHours > 0) payload.dueHours = dueHours;
+
+        const result = await api(`/teacher/test-sessions/${state.teacherSupplementSessionId}/supplement`, {
+          method: "POST",
+          body: payload,
+        });
+
+        toast(`보충 과제 생성 완료 (${result.questionCount}문항)`);
+        state.teacherSupplementSessionId = null;
+        state.teacherSupplementContext = null;
+        await renderTeacher(true);
+      } catch (err) {
+        toast(err.message);
+      }
+    });
+
+    document.getElementById("clearSupplementBtn").addEventListener("click", () => {
+      state.teacherSupplementSessionId = null;
+      state.teacherSupplementContext = null;
+      renderTeacherSupplementEntry();
+      const panel = document.getElementById("teacherToolSupplement");
+      if (panel) panel.open = false;
+    });
   }
 
   function renderTeacherOfflineEntry() {
@@ -1880,7 +3028,7 @@
     if (!area) return;
 
     if (!state.teacherOfflineSessionId || state.teacherOfflineQuestions.length === 0) {
-      area.innerHTML = '과제 목록에서 "오프라인입력"을 누르면 여기에 학생 답안을 입력할 수 있습니다.';
+      area.innerHTML = '과제 목록에서 오프라인 입력을 누르면 여기서 학생 답안을 반영할 수 있습니다.';
       area.className = "note-lines";
       return;
     }
@@ -1963,10 +3111,13 @@
       state.teacherOfflineQuestions = [];
       state.teacherOfflineContext = null;
       renderTeacherOfflineEntry();
+      const panel = document.getElementById("teacherToolOffline");
+      if (panel) panel.open = false;
     });
   }
 
   async function renderParent() {
+    renderViewSkeleton(parentView, "parent");
     const data = await api("/parents/me/reports");
     const reports = data.reports || [];
 
@@ -2094,6 +3245,18 @@
     renderRoleView().catch(handleRenderError);
   });
 
+  const handleTeacherCompactLayoutChange = () => {
+    if (!["TEACHER", "ADMIN"].includes(state.role)) return;
+    if (!syncTeacherViewModeForViewport()) return;
+    renderTeacherBoard();
+  };
+
+  if (typeof teacherCompactLayoutMedia.addEventListener === "function") {
+    teacherCompactLayoutMedia.addEventListener("change", handleTeacherCompactLayoutChange);
+  } else if (typeof teacherCompactLayoutMedia.addListener === "function") {
+    teacherCompactLayoutMedia.addListener(handleTeacherCompactLayoutChange);
+  }
+
   function handleRenderError(err) {
     clearAuth();
     renderShell();
@@ -2101,11 +3264,13 @@
   }
 
   async function bootstrap() {
-    const loggedInByLink = await tryLoginWithAccessLink();
-    if (loggedInByLink) {
-      toast("링크 로그인 성공");
-    }
-    await renderRoleView();
+    await withLoading(async () => {
+      const loggedInByLink = await tryLoginWithAccessLink();
+      if (loggedInByLink) {
+        toast("링크 로그인 성공");
+      }
+      await renderRoleView();
+    }, "단어장을 준비하는 중");
   }
 
   bootstrap().catch(handleRenderError);

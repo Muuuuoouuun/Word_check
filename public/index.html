@@ -53,6 +53,22 @@
         <section id="parentView" class="hidden reveal"></section>
       </section>
 
+      <section id="loadingOverlay" class="loading-overlay hidden" aria-hidden="true" aria-live="polite">
+        <div class="loading-card">
+          <p class="loading-stamp">Opening the notebook</p>
+          <p id="loadingLabel" class="loading-label">단어장을 준비하는 중</p>
+          <div class="loading-word-stack">
+            <strong id="loadingWord" class="loading-word">apple</strong>
+            <p id="loadingMeaning" class="loading-meaning">사과</p>
+          </div>
+          <div class="loading-dots" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+      </section>
+
       <section id="toast" class="toast hidden"></section>
     </main>
 
