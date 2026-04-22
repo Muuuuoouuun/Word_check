@@ -20,12 +20,20 @@ function insertNotification({
   ).run(uid(), assignmentId, studentId, parentId, tier, channel, scheduledAt, JSON.stringify(payload || {}), idempotencyKey, nowIso());
 }
 
-function getTeacherSettings(ownerTeacherId) {
-  return getResolvedSettings({ ownerTeacherId });
+function createSettingsCache() {
+  return new Map();
 }
 
-function queueTier1(assignment) {
-  const settings = getTeacherSettings(assignment.teacher_id);
+function getTeacherSettings(ownerTeacherId, cache = null) {
+  if (!cache) return getResolvedSettings({ ownerTeacherId });
+  if (!cache.has(ownerTeacherId)) {
+    cache.set(ownerTeacherId, getResolvedSettings({ ownerTeacherId }));
+  }
+  return cache.get(ownerTeacherId);
+}
+
+function queueTier1(assignment, settingsCache = null) {
+  const settings = getTeacherSettings(assignment.teacher_id, settingsCache);
   if (!settings.notify_student_on_publish) {
     return;
   }
@@ -41,8 +49,8 @@ function queueTier1(assignment) {
   });
 }
 
-function queueTier2(assignment) {
-  const settings = getTeacherSettings(assignment.teacher_id);
+function queueTier2(assignment, settingsCache = null) {
+  const settings = getTeacherSettings(assignment.teacher_id, settingsCache);
   if (!settings.notify_student_on_reminder) {
     return;
   }
@@ -58,11 +66,11 @@ function queueTier2(assignment) {
   });
 }
 
-function queueTier3ForCompletion(assignmentId) {
+function queueTier3ForCompletion(assignmentId, settingsCache = null) {
   const assignment = db.prepare(`SELECT * FROM homework_assignments WHERE id = ?`).get(assignmentId);
   if (!assignment) return;
 
-  const settings = getTeacherSettings(assignment.teacher_id);
+  const settings = getTeacherSettings(assignment.teacher_id, settingsCache);
   if (!settings.notify_parent_on_completed) {
     return;
   }
@@ -93,8 +101,8 @@ function queueTier3ForCompletion(assignmentId) {
   }
 }
 
-function queueTier3ForMissed(assignment) {
-  const settings = getTeacherSettings(assignment.teacher_id);
+function queueTier3ForMissed(assignment, settingsCache = null) {
+  const settings = getTeacherSettings(assignment.teacher_id, settingsCache);
   if (!settings.notify_parent_on_missed) {
     return;
   }
@@ -126,6 +134,7 @@ function queueTier3ForMissed(assignment) {
 
 function dispatchDueAssignments() {
   const now = nowIso();
+  const settingsCache = createSettingsCache();
   const dueRows = db
     .prepare(
       `SELECT * FROM homework_assignments
@@ -136,7 +145,7 @@ function dispatchDueAssignments() {
   for (const assignment of dueRows) {
     try {
       generateTestForAssignment(assignment.id);
-      queueTier1(assignment);
+      queueTier1(assignment, settingsCache);
     } catch (err) {
       console.error("dispatchDueAssignments error", assignment.id, err.message);
       db.prepare(`UPDATE homework_assignments SET status = 'CANCELED', updated_at = ? WHERE id = ?`).run(nowIso(), assignment.id);
@@ -147,35 +156,40 @@ function dispatchDueAssignments() {
 function processMissedAssignments() {
   const now = nowIso();
   const nowMs = Date.now();
+  const settingsCache = createSettingsCache();
   const targetRows = db
     .prepare(
       `SELECT * FROM homework_assignments
-       WHERE status IN ('PUBLISHED','IN_PROGRESS')`
+       WHERE status IN ('PUBLISHED','IN_PROGRESS')
+         AND due_at <= ?`
     )
-    .all();
+    .all(now);
 
-  const tx = db.transaction(() => {
-    for (const assignment of targetRows) {
-      const dueMs = new Date(assignment.due_at).getTime();
-      if (!Number.isFinite(dueMs) || dueMs > nowMs) {
-        continue;
-      }
-
-      const settings = getTeacherSettings(assignment.teacher_id);
-      const delayMinutes = Math.max(0, Number(settings.student_reminder_delay_minutes || 0));
-      queueTier2(assignment);
-
-      if (dueMs + delayMinutes * 60 * 1000 > nowMs) {
-        continue;
-      }
-
-      db.prepare(`UPDATE homework_assignments SET status = 'MISSED', updated_at = ? WHERE id = ?`).run(now, assignment.id);
-      db.prepare(`UPDATE test_sessions SET status = 'MISSED', updated_at = ? WHERE assignment_id = ? AND status != 'COMPLETED'`).run(now, assignment.id);
-      queueTier3ForMissed(assignment);
-    }
+  const markMissed = db.transaction((assignment) => {
+    db.prepare(`UPDATE homework_assignments SET status = 'MISSED', updated_at = ? WHERE id = ?`).run(now, assignment.id);
+    db.prepare(`UPDATE test_sessions SET status = 'MISSED', updated_at = ? WHERE assignment_id = ? AND status != 'COMPLETED'`).run(
+      now,
+      assignment.id
+    );
+    queueTier3ForMissed(assignment, settingsCache);
   });
 
-  tx();
+  for (const assignment of targetRows) {
+    const dueMs = new Date(assignment.due_at).getTime();
+    if (!Number.isFinite(dueMs) || dueMs > nowMs) {
+      continue;
+    }
+
+    const settings = getTeacherSettings(assignment.teacher_id, settingsCache);
+    const delayMinutes = Math.max(0, Number(settings.student_reminder_delay_minutes || 0));
+    queueTier2(assignment, settingsCache);
+
+    if (dueMs + delayMinutes * 60 * 1000 > nowMs) {
+      continue;
+    }
+
+    markMissed(assignment);
+  }
 }
 
 function sendDueNotifications() {

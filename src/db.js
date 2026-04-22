@@ -8,8 +8,9 @@ const absDbFile = path.resolve(process.cwd(), dbFile);
 fs.mkdirSync(path.dirname(absDbFile), { recursive: true });
 
 const db = new Database(absDbFile);
-db.pragma("foreign_keys = ON");
-
+db.pragma("busy_timeout = 5000");
 db.pragma("journal_mode = WAL");
+db.pragma("synchronous = NORMAL");
+db.pragma("foreign_keys = ON");
 
 module.exports = db;

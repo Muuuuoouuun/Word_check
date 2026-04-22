@@ -152,6 +152,11 @@ CREATE TABLE IF NOT EXISTS homework_assignments (
   range_start_lesson INTEGER NOT NULL,
   range_end_lesson INTEGER NOT NULL,
   question_count INTEGER NOT NULL,
+  assignment_kind TEXT NOT NULL CHECK(assignment_kind IN ('REGULAR','SUPPLEMENT')) DEFAULT 'REGULAR',
+  preview_enabled INTEGER NOT NULL DEFAULT 0,
+  preview_duration_sec INTEGER NOT NULL DEFAULT 60,
+  preview_scope TEXT NOT NULL CHECK(preview_scope IN ('ALL','KEYWORDS','WRONG_ONLY')) DEFAULT 'ALL',
+  gamification_enabled INTEGER NOT NULL DEFAULT 1,
   publish_at TEXT NOT NULL,
   due_at TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('SCHEDULED','PUBLISHED','IN_PROGRESS','COMPLETED','MISSED','CANCELED')) DEFAULT 'SCHEDULED',
@@ -170,6 +175,8 @@ CREATE TABLE IF NOT EXISTS test_sessions (
   generated_seed TEXT NOT NULL,
   started_at TEXT,
   completed_at TEXT,
+  preview_started_at TEXT,
+  preview_completed_at TEXT,
   score INTEGER,
   out_of INTEGER,
   locked_at TEXT,
@@ -204,6 +211,95 @@ CREATE TABLE IF NOT EXISTS student_answers (
   UNIQUE(test_session_id, question_id),
   FOREIGN KEY(test_session_id) REFERENCES test_sessions(id) ON DELETE CASCADE,
   FOREIGN KEY(question_id) REFERENCES test_questions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS student_vocab_stats (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL,
+  vocab_item_id TEXT NOT NULL,
+  exposure_count INTEGER NOT NULL DEFAULT 0,
+  correct_count INTEGER NOT NULL DEFAULT 0,
+  wrong_count INTEGER NOT NULL DEFAULT 0,
+  current_streak INTEGER NOT NULL DEFAULT 0,
+  mastery_score INTEGER NOT NULL DEFAULT 0,
+  ease_factor REAL NOT NULL DEFAULT 2.0,
+  interval_days INTEGER NOT NULL DEFAULT 0,
+  lapse_count INTEGER NOT NULL DEFAULT 0,
+  last_seen_at TEXT,
+  next_review_at TEXT,
+  last_result TEXT CHECK(last_result IN ('CORRECT','WRONG')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(student_id, vocab_item_id),
+  FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE,
+  FOREIGN KEY(vocab_item_id) REFERENCES vocab_items(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS student_game_profiles (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL UNIQUE,
+  current_streak INTEGER NOT NULL DEFAULT 0,
+  longest_streak INTEGER NOT NULL DEFAULT 0,
+  total_xp INTEGER NOT NULL DEFAULT 0,
+  level INTEGER NOT NULL DEFAULT 1,
+  last_activity_date TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS student_xp_events (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  source_type TEXT,
+  source_id TEXT,
+  xp_delta INTEGER NOT NULL,
+  payload TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS student_badge_grants (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL,
+  badge_code TEXT NOT NULL,
+  badge_title TEXT NOT NULL,
+  badge_description TEXT,
+  granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(student_id, badge_code),
+  FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS review_sets (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL,
+  assignment_id TEXT NOT NULL,
+  source_session_id TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK(status IN ('OPEN','COMPLETED')) DEFAULT 'OPEN',
+  item_count INTEGER NOT NULL,
+  recovered_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE,
+  FOREIGN KEY(assignment_id) REFERENCES homework_assignments(id) ON DELETE CASCADE,
+  FOREIGN KEY(source_session_id) REFERENCES test_sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS review_set_items (
+  id TEXT PRIMARY KEY,
+  review_set_id TEXT NOT NULL,
+  question_id TEXT NOT NULL,
+  vocab_item_id TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  blank_sentence TEXT,
+  meaning_primary TEXT,
+  expected_answer TEXT NOT NULL,
+  response TEXT,
+  order_no INTEGER NOT NULL,
+  is_recovered INTEGER NOT NULL DEFAULT 0,
+  recovered_at TEXT,
+  FOREIGN KEY(review_set_id) REFERENCES review_sets(id) ON DELETE CASCADE,
+  FOREIGN KEY(question_id) REFERENCES test_questions(id) ON DELETE CASCADE,
+  FOREIGN KEY(vocab_item_id) REFERENCES vocab_items(id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS proxy_submission_log (
@@ -255,9 +351,22 @@ CREATE TABLE IF NOT EXISTS outbox_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_assignment_status_due ON homework_assignments(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_assignment_status_publish ON homework_assignments(status, publish_at);
 CREATE INDEX IF NOT EXISTS idx_assignment_student_publish ON homework_assignments(student_id, publish_at);
+CREATE INDEX IF NOT EXISTS idx_assignment_student_status_due ON homework_assignments(student_id, status, due_at);
+CREATE INDEX IF NOT EXISTS idx_assignment_teacher_kind ON homework_assignments(teacher_id, assignment_kind, status);
 CREATE INDEX IF NOT EXISTS idx_notification_status_scheduled ON notification_log(status, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_vocab_items_source_lesson ON vocab_items(source_id, lesson_id);
+CREATE INDEX IF NOT EXISTS idx_test_sessions_student_status_completed ON test_sessions(student_id, status, completed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_test_questions_session_vocab ON test_questions(test_session_id, vocab_item_id);
+CREATE INDEX IF NOT EXISTS idx_student_answers_session_correct ON student_answers(test_session_id, is_correct);
+CREATE INDEX IF NOT EXISTS idx_student_vocab_stats_student_review ON student_vocab_stats(student_id, next_review_at);
+CREATE INDEX IF NOT EXISTS idx_student_vocab_stats_student_mastery ON student_vocab_stats(student_id, mastery_score);
 CREATE INDEX IF NOT EXISTS idx_app_settings_scope_teacher ON app_settings(scope, owner_teacher_id, setting_key);
 CREATE INDEX IF NOT EXISTS idx_login_access_links_user_expires ON login_access_links(user_id, expires_at);
 CREATE INDEX IF NOT EXISTS idx_proxy_submission_log_session ON proxy_submission_log(test_session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_student_game_profiles_student ON student_game_profiles(student_id);
+CREATE INDEX IF NOT EXISTS idx_student_xp_events_student_created ON student_xp_events(student_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_student_badge_grants_student_granted ON student_badge_grants(student_id, granted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_review_sets_student_status ON review_sets(student_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_review_set_items_review_set_order ON review_set_items(review_set_id, order_no);

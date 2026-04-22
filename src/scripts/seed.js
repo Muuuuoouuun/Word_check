@@ -9,6 +9,7 @@ function resetDemoData() {
       DELETE FROM outbox_events;
       DELETE FROM proxy_submission_log;
       DELETE FROM student_answers;
+      DELETE FROM student_vocab_stats;
       DELETE FROM test_questions;
       DELETE FROM test_sessions;
       DELETE FROM homework_assignments;

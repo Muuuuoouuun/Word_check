@@ -1,9 +1,11 @@
-﻿(() => {
+(() => {
   const AUTH_STORAGE_KEYS = ["accessToken", "role", "studentId", "teacherId", "parentId"];
   const TEACHER_COMPACT_LAYOUT_QUERY = "(max-width: 780px)";
   const EXAM_AUTOFOCUS_VIEWPORT_QUERY = "(max-width: 820px)";
   const COARSE_POINTER_QUERY = "(pointer: coarse)";
+  const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
   const teacherCompactLayoutMedia = window.matchMedia(TEACHER_COMPACT_LAYOUT_QUERY);
+  const reducedMotionMedia = window.matchMedia(REDUCED_MOTION_QUERY);
   const LOADING_WORDS = [
     { word: "apple", meaning: "사과" },
     { word: "orbit", meaning: "궤도" },
@@ -12,6 +14,33 @@
     { word: "memory", meaning: "기억" },
     { word: "notebook", meaning: "공책" },
   ];
+  const FONT_STYLESHEET_URL =
+    "https://fonts.googleapis.com/css2?family=Gaegu:wght@400;700&family=Gowun+Batang:wght@400;700&family=Noto+Sans+KR:wght@400;500;700;800;900&display=swap";
+
+  function loadDeferredFonts() {
+    if (document.querySelector(`link[href="${FONT_STYLESHEET_URL}"]`)) return;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = FONT_STYLESHEET_URL;
+    document.head.appendChild(link);
+  }
+
+  function scheduleDeferredFonts() {
+    const load = () => {
+      if ("requestIdleCallback" in window) {
+        window.requestIdleCallback(loadDeferredFonts, { timeout: 2000 });
+      } else {
+        window.setTimeout(loadDeferredFonts, 700);
+      }
+    };
+
+    if (document.readyState === "complete") {
+      load();
+      return;
+    }
+
+    window.addEventListener("load", load, { once: true });
+  }
 
   function readStoredAuth(key) {
     return localStorage.getItem(key) || sessionStorage.getItem(key) || null;
@@ -39,12 +68,17 @@
     teacherId: readStoredAuth("teacherId"),
     parentId: readStoredAuth("parentId"),
     rememberLogin: localStorage.getItem("rememberLogin") !== "0",
+    studentDashboard: null,
+    studentPreview: null,
+    studentPreviewTimerId: null,
     studentExam: null,
     studentExamTimerId: null,
     studentResult: null,
     studentReview: null,
+    studentDashboardScreen: "study",
     teacherMeta: null,
     teacherAssignments: [],
+    teacherLearningOverview: null,
     teacherSettings: null,
     teacherSettingsOwnerId: null,
     teacherAccessLink: null,
@@ -117,6 +151,7 @@
   function startLoadingRotation() {
     if (loadingState.rotationTimerId) return;
     setLoadingWord(loadingState.wordIndex);
+    if (reducedMotionMedia.matches) return;
     loadingState.rotationTimerId = window.setInterval(() => {
       loadingState.wordIndex = (loadingState.wordIndex + 1) % LOADING_WORDS.length;
       setLoadingWord(loadingState.wordIndex);
@@ -156,15 +191,6 @@
       loadingOverlay.setAttribute("aria-hidden", "true");
       stopLoadingRotation();
     }, 120);
-  }
-
-  async function withLoading(task, label) {
-    beginLoading(label);
-    try {
-      return await task();
-    } finally {
-      endLoading();
-    }
   }
 
   function toast(message, ms = 2200) {
@@ -211,16 +237,21 @@
 
   function clearAuth() {
     clearStudentExamTimer();
+    clearStudentPreviewTimer();
     state.token = null;
     state.role = null;
     state.studentId = null;
     state.teacherId = null;
     state.parentId = null;
+    state.studentDashboard = null;
+    state.studentPreview = null;
     state.studentExam = null;
     state.studentResult = null;
     state.studentReview = null;
+    state.studentDashboardScreen = "study";
     state.teacherMeta = null;
     state.teacherAssignments = [];
+    state.teacherLearningOverview = null;
     state.teacherSettings = null;
     state.teacherSettingsOwnerId = null;
     state.teacherAccessLink = null;
@@ -343,6 +374,7 @@
   function renderShell() {
     const examMode = state.role === "STUDENT" && isStudentFocusRoute();
     document.body.classList.toggle("exam-mode", examMode);
+    document.body.classList.toggle("student-home-mode", state.role === "STUDENT" && !examMode);
     const roleLabel = state.role === "ADMIN" ? "ADMIN 운영 모드" : state.role ? `${state.role} 로그인` : "로그인 필요";
     const roleText = roleLabel;
     whoami.textContent = roleText;
@@ -399,6 +431,14 @@
         </div>
       </section>
     `;
+  }
+
+  function scheduleViewSkeleton(target, variant = "student", delay = 140) {
+    const timerId = window.setTimeout(() => {
+      renderViewSkeleton(target, variant);
+    }, delay);
+
+    return () => window.clearTimeout(timerId);
   }
 
   function statusLabel(status) {
@@ -589,11 +629,19 @@
 
   function teacherAssignmentStatusMarkup(assignment) {
     const sessionBadge = assignment.test_session_id ? statusBadge(assignment.test_session_status) : '<span class="badge">시험지 없음</span>';
+    const previewBadge = assignment.preview_enabled
+      ? `<span class="badge">미리보기 ${escapeHtml(Math.max(0, Number(assignment.preview_duration_sec || 0)))}초</span>`
+      : "";
+    const gameBadge = assignment.gamification_enabled ? '<span class="badge done">XP/배지</span>' : "";
+    const kindBadge = assignment.assignment_kind === "SUPPLEMENT" ? '<span class="badge">보충</span>' : "";
     return `
       <div class="assignment-status-stack">
         <div class="row assignment-status-row">
           ${statusBadge(assignment.status)}
           ${sessionBadge}
+          ${kindBadge}
+          ${previewBadge}
+          ${gameBadge}
         </div>
         <p class="meta assignment-status-copy">${escapeHtml(teacherAssignmentSituation(assignment))}</p>
       </div>
@@ -757,6 +805,37 @@
     return Number.isFinite(dueHours) && dueHours > 0 ? dueHours : 2;
   }
 
+  function getDefaultPreviewEnabled() {
+    return Boolean(getTeacherSettingsValue("default_preview_enabled", false));
+  }
+
+  function getDefaultPreviewDurationSec() {
+    const seconds = Number(getTeacherSettingsValue("default_preview_duration_sec", 60));
+    return Number.isFinite(seconds) && seconds >= 0 ? seconds : 60;
+  }
+
+  function getDefaultPreviewScope() {
+    const scope = String(getTeacherSettingsValue("default_preview_scope", "ALL") || "ALL").toUpperCase();
+    return ["ALL", "KEYWORDS", "WRONG_ONLY"].includes(scope) ? scope : "ALL";
+  }
+
+  function getDefaultGamificationEnabled() {
+    return Boolean(getTeacherSettingsValue("default_gamification_enabled", true));
+  }
+
+  function previewScopeOptions() {
+    return [
+      { value: "ALL", label: "전체 단어" },
+      { value: "KEYWORDS", label: "핵심 단어 5개" },
+      { value: "WRONG_ONLY", label: "지난 오답 우선" },
+    ];
+  }
+
+  function previewScopeLabel(value) {
+    const option = previewScopeOptions().find((item) => item.value === String(value || "ALL").toUpperCase());
+    return option?.label || "전체 단어";
+  }
+
   function buildDueAtInputValue(publishInputValue, dueHours = getDefaultDueHours()) {
     const baseDate = publishInputValue ? new Date(String(publishInputValue)) : new Date();
     const nextDate = new Date(baseDate.getTime() + dueHours * 60 * 60 * 1000);
@@ -766,9 +845,14 @@
   function teacherSettingsFieldOrder() {
     return [
       "default_assignment_due_hours",
+      "adaptive_learning_enabled",
       "supplement_min_wrong",
       "supplement_max_questions",
       "supplement_due_hours",
+      "default_preview_enabled",
+      "default_preview_duration_sec",
+      "default_preview_scope",
+      "default_gamification_enabled",
       "notify_student_on_publish",
       "notify_student_on_reminder",
       "student_reminder_delay_minutes",
@@ -786,6 +870,11 @@
     return match ? decodeURIComponent(match[1]) : null;
   }
 
+  function getStudentPreviewRouteSessionId() {
+    const match = window.location.hash.match(/^#student-preview\/(.+)$/);
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
   function isStudentResultRoute() {
     return window.location.hash === "#student-result";
   }
@@ -794,8 +883,21 @@
     return window.location.hash === "#student-review";
   }
 
+  function isStudentPreviewRoute() {
+    return Boolean(getStudentPreviewRouteSessionId());
+  }
+
   function isStudentFocusRoute() {
-    return Boolean(getStudentExamRouteSessionId()) || isStudentResultRoute() || isStudentReviewRoute();
+    return Boolean(getStudentExamRouteSessionId()) || isStudentPreviewRoute() || isStudentResultRoute() || isStudentReviewRoute();
+  }
+
+  function navigateToStudentPreview(sessionId) {
+    const nextHash = `#student-preview/${encodeURIComponent(sessionId)}`;
+    if (window.location.hash === nextHash) {
+      renderRoleView().catch(handleRenderError);
+      return;
+    }
+    window.location.hash = nextHash;
   }
 
   function navigateToStudentExam(sessionId) {
@@ -840,7 +942,7 @@
   }
 
   function escapeHtml(value) {
-    return String(value || "").replace(/[&<>"']/g, (char) => {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, (char) => {
       const entities = {
         "&": "&amp;",
         "<": "&lt;",
@@ -889,11 +991,42 @@
     return startedAtMs + getStudentExamTimeLimitMs(exam.questions.length);
   }
 
+  function clearStudentPreviewTimer() {
+    if (state.studentPreviewTimerId) {
+      window.clearInterval(state.studentPreviewTimerId);
+      state.studentPreviewTimerId = null;
+    }
+  }
+
   function clearStudentExamTimer() {
     if (state.studentExamTimerId) {
       window.clearInterval(state.studentExamTimerId);
       state.studentExamTimerId = null;
     }
+  }
+
+  function getStudentPreviewRemainingSeconds(preview = state.studentPreview) {
+    if (!preview) return 0;
+    const durationSec = Math.max(0, Number(preview.previewDurationSec || 0));
+    if (durationSec === 0) return 0;
+    const startedAtMs = new Date(preview.previewStartedAt || Date.now()).getTime();
+    if (Number.isNaN(startedAtMs)) return durationSec;
+    const unlockAtMs = startedAtMs + durationSec * 1000;
+    return Math.max(0, Math.ceil((unlockAtMs - Date.now()) / 1000));
+  }
+
+  function buildStudentReviewState(reviewSet) {
+    return {
+      id: reviewSet?.id || null,
+      status: reviewSet?.status || "OPEN",
+      sourceName: reviewSet?.sourceName || null,
+      recoveredCount: reviewSet?.recoveredCount || 0,
+      itemCount: reviewSet?.itemCount || 0,
+      gamificationEnabled: Boolean(reviewSet?.gamificationEnabled),
+      batches: getReviewBatches(reviewSet?.items || []),
+      batchIndex: 0,
+      rewards: null,
+    };
   }
 
   function getReviewBatches(items = []) {
@@ -908,6 +1041,9 @@
     if (!state.studentResult) return "";
 
     const result = state.studentResult;
+    const badgeList = (result.newBadges || [])
+      .map((badge) => `<span class="badge done">${escapeHtml(badge.badge_title || badge.badge_code)}</span>`)
+      .join("");
     const wrongPreview = (result.wrongItems || [])
       .slice(0, 3)
       .map(
@@ -933,6 +1069,16 @@
           <article class="kpi"><p class="kpi-label">소요 시간</p><p class="kpi-value">${formatDuration(result.elapsedSeconds)}</p></article>
         </div>
         ${
+          result.earnedXp || badgeList
+            ? `
+              <div class="student-game-inline">
+                ${result.earnedXp ? `<span class="badge done">XP +${escapeHtml(result.earnedXp)}</span>` : ""}
+                ${badgeList}
+              </div>
+            `
+            : ""
+        }
+        ${
           wrongPreview
             ? `<ul class="result-mini-list">${wrongPreview}</ul>`
             : `<p class="meta">이번 시험은 모든 문항을 맞혔습니다.</p>`
@@ -951,12 +1097,147 @@
 
   function getPendingAssignment(items) {
     return sortStudentAssignments(
-      items.filter((i) => ["SCHEDULED", "PUBLISHED", "IN_PROGRESS"].includes(i.status))
+      items.filter((i) => ["SCHEDULED", "PUBLISHED", "IN_PROGRESS", "MISSED"].includes(i.status))
     )[0];
   }
 
   function countByStatus(items, status) {
     return items.filter((x) => x.status === status).length;
+  }
+
+  function studentBadgePillMarkup(badges = []) {
+    return badges
+      .slice(0, 4)
+      .map((badge) => `<span class="badge done">${escapeHtml(badge.badge_title || badge.badge_code || "Badge")}</span>`)
+      .join("");
+  }
+
+  function studentGameProfileMarkup(gameProfile) {
+    if (!gameProfile) return "";
+
+    return `
+      <section class="paper student-game-panel">
+        <div class="paper-head">
+          <h2>오늘의 성장</h2>
+          <p>점수만 보지 않고 꾸준함과 회복까지 함께 보여줍니다.</p>
+        </div>
+        <div class="student-game-grid">
+          <article class="card student-game-card">
+            <p class="student-game-label">Level</p>
+            <p class="student-game-value">Lv.${escapeHtml(gameProfile.level || 1)}</p>
+            <p class="meta">누적 XP ${escapeHtml(gameProfile.totalXp || 0)}</p>
+          </article>
+          <article class="card student-game-card">
+            <p class="student-game-label">연속 학습</p>
+            <p class="student-game-value">${escapeHtml(gameProfile.currentStreak || 0)}일</p>
+            <p class="meta">최고 기록 ${escapeHtml(gameProfile.longestStreak || 0)}일</p>
+          </article>
+        </div>
+        ${
+          gameProfile.recentBadges?.length
+            ? `<div class="student-game-inline">${studentBadgePillMarkup(gameProfile.recentBadges)}</div>`
+            : `<p class="meta">배지는 시험 완료와 오답 회복을 쌓아가며 열립니다.</p>`
+        }
+      </section>
+    `;
+  }
+
+  function studentLearningCoachMarkup(summary) {
+    if (!summary) return "";
+    const weakWords = Array.isArray(summary.weakWords) ? summary.weakWords : [];
+    const wordRows = weakWords.length
+      ? weakWords
+          .map(
+            (word) => `
+              <li class="learning-word-item">
+                <span>
+                  <strong>${escapeHtml(word.lemma)}</strong>
+                  <small>${escapeHtml(word.meaning || "")}</small>
+                </span>
+                <em>${escapeHtml(word.masteryScore || 0)}%</em>
+              </li>
+            `
+          )
+          .join("")
+      : `<li class="learning-word-item empty"><span><strong>아직 약점 단어가 없습니다.</strong><small>시험을 마치면 자동으로 분석합니다.</small></span></li>`;
+
+    return `
+      <section class="paper learning-coach-card">
+        <div class="paper-head">
+          <h2>단어 알고리즘 코치</h2>
+          <p>${escapeHtml(summary.message || "시험 결과를 바탕으로 다음 단어를 고릅니다.")}</p>
+        </div>
+        <div class="learning-coach-grid">
+          <article class="learning-metric">
+            <span>평균 숙련도</span>
+            <strong>${escapeHtml(summary.avgMastery || 0)}%</strong>
+          </article>
+          <article class="learning-metric">
+            <span>복습 예정</span>
+            <strong>${escapeHtml(summary.dueNow || 0)}</strong>
+          </article>
+          <article class="learning-metric">
+            <span>약한 단어</span>
+            <strong>${escapeHtml(summary.weakCount || 0)}</strong>
+          </article>
+        </div>
+        <ul class="learning-word-list">${wordRows}</ul>
+      </section>
+    `;
+  }
+
+  function studentReviewTaskMarkup(reviewTask) {
+    if (!reviewTask) return "";
+
+    return `
+      <article class="card student-review-card">
+        <div class="row row-between">
+          <div>
+            <p class="student-queue-label">Recovery Loop</p>
+            <p class="student-queue-title">${escapeHtml(reviewTask.sourceName || "오답 복습")}</p>
+          </div>
+          <span class="badge">${escapeHtml(`${reviewTask.itemCount || reviewTask.items?.length || 0}개`)}</span>
+        </div>
+        <p class="meta">가장 최근에 틀린 단어를 3개씩 묶어서 다시 확인합니다.</p>
+        <div class="row">
+          <button class="btn btn-quiet" data-action="open-review-set" data-review-set-id="${reviewTask.id}">틀린 단어 다시 보기</button>
+        </div>
+      </article>
+    `;
+  }
+
+  function studentGrowthCardMarkup(growth) {
+    if (!growth?.message) return "";
+    return `
+      <article class="card student-growth-card">
+        <p class="student-queue-label">이번 주 흐름</p>
+        <p class="student-queue-title">${escapeHtml(growth.message)}</p>
+        <p class="meta">열린 오답 복습 ${escapeHtml(growth.openReviewCount || 0)}개</p>
+      </article>
+    `;
+  }
+
+  function studentDashboardPanelButton(screen, label, activeScreen) {
+    const isActive = screen === activeScreen;
+    return `<button class="student-screen-tab${isActive ? " active" : ""}" id="student-tab-${screen}" type="button" role="tab" aria-selected="${isActive}" aria-controls="student-panel-${screen}" data-student-screen="${screen}">${label}</button>`;
+  }
+
+  function studentDashboardPanel(screen, activeScreen, content) {
+    const isActive = screen === activeScreen;
+    return `<section class="student-dashboard-panel${isActive ? " active" : ""}" id="student-panel-${screen}" role="tabpanel" aria-labelledby="student-tab-${screen}" aria-hidden="${!isActive}" data-student-panel="${screen}">${content}</section>`;
+  }
+
+  function activateStudentDashboardPanel(screen) {
+    state.studentDashboardScreen = screen;
+    studentView.querySelectorAll("[data-student-screen]").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.studentScreen === screen);
+      btn.setAttribute("aria-selected", String(btn.dataset.studentScreen === screen));
+    });
+    studentView.querySelectorAll("[data-student-panel]").forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.studentPanel === screen);
+      panel.setAttribute("aria-hidden", String(panel.dataset.studentPanel !== screen));
+    });
+    studentView.querySelector(".student-screen-shell")?.scrollIntoView({ block: "start" });
   }
 
   function studentAssignmentPriority(item) {
@@ -979,8 +1260,8 @@
   }
 
   function studentPrimaryActionLabel(item) {
-    if (item.test_session_status === "IN_PROGRESS") return "이어서 집중하기";
-    if (item.test_session_id) return "지금 5분 집중하기";
+    if (item.test_session_status === "IN_PROGRESS") return "이어서 테스트";
+    if (item.test_session_id) return "빠른 암기 시작";
     if (item.status === "SCHEDULED") return "열릴 때까지 기다리는 중";
     return "시험 준비중";
   }
@@ -990,8 +1271,12 @@
       return "저장된 답안 그대로 이어집니다. 지금 한 문제씩 차분하게 마무리하면 됩니다.";
     }
 
+    if (item.preview_enabled && !item.preview_completed_at && item.test_session_id) {
+      return "단어 뜻과 예문을 한 장씩 넘기며 빠르게 외운 뒤 테스트로 이어집니다.";
+    }
+
     if (item.test_session_id && item.status === "PUBLISHED") {
-      return "오늘 가장 먼저 끝내면 좋은 과제입니다. 시험 후에는 결과와 오답 복습으로 바로 이어집니다.";
+      return "암기 카드를 먼저 보고 바로 테스트합니다. 긴 설명 없이 한 화면씩 넘어갑니다.";
     }
 
     if (item.status === "SCHEDULED") {
@@ -1007,6 +1292,7 @@
 
   function studentQueueLabel(item) {
     if (item.test_session_status === "IN_PROGRESS") return "이어 풀기";
+    if (item.preview_enabled && !item.preview_completed_at) return "미리보기 대기";
     if (item.status === "PUBLISHED") return "다음 우선순위";
     if (item.status === "SCHEDULED") return "곧 열릴 과제";
     if (item.status === "MISSED") return "다시 챙기기";
@@ -1015,10 +1301,21 @@
   }
 
   async function renderStudentDashboard() {
+    clearStudentPreviewTimer();
     clearStudentExamTimer();
-    renderViewSkeleton(studentView, "student");
-    const data = await api("/students/me/dashboard");
+    const cancelSkeleton = scheduleViewSkeleton(studentView, "student");
+    let data;
+    try {
+      data = await api("/students/me/dashboard", { showLoading: false });
+    } finally {
+      cancelSkeleton();
+    }
+    state.studentDashboard = data;
     const items = data.items || [];
+    const reviewTask = data.reviewTask || null;
+    const gameProfile = data.gameProfile || null;
+    const learningSummary = data.learningSummary || null;
+    const growth = data.recentGrowth || null;
     const pending = getPendingAssignment(items);
     const sortedItems = sortStudentAssignments(items);
     const remainingItems = sortedItems.filter((item) => item.id !== pending?.id);
@@ -1029,13 +1326,16 @@
       missed: countByStatus(items, "MISSED"),
       completed: items.filter((i) => i.test_session_status === "COMPLETED").length,
     };
+    const activeScreen = state.studentDashboardScreen || "study";
+    const primaryAction = pending?.test_session_status === "IN_PROGRESS" ? "open-session" : "open-memorize";
+    const activeFlowStep = pending?.test_session_status === "IN_PROGRESS" ? "test" : "memorize";
 
     const primaryCard = pending
       ? `
         <section class="paper student-focus-card">
           <div class="row row-between student-focus-head">
             <div>
-              <p class="student-focus-kicker">${pending.test_session_status === "IN_PROGRESS" ? "Resume Mode" : "Today's Task"}</p>
+              <p class="student-focus-kicker">${pending.test_session_status === "IN_PROGRESS" ? "이어 하기" : "오늘 학습"}</p>
               <h2 class="student-focus-title">${escapeHtml(pending.source_name)}</h2>
             </div>
             ${statusBadge(pending.status)}
@@ -1059,11 +1359,31 @@
               <strong>${escapeHtml(`${pending.question_count}문항`)}</strong>
             </article>
           </div>
+          <div class="student-flow-steps" aria-label="학습 순서">
+            <div class="student-flow-step ${activeFlowStep === "memorize" ? "active" : ""}"><span>1</span><strong>빠른 암기</strong><small>단어 카드를 넘기며 확인</small></div>
+            <div class="student-flow-step ${activeFlowStep === "test" ? "active" : ""}"><span>2</span><strong>테스트</strong><small>한 문제씩 바로 입력</small></div>
+            <div class="student-flow-step"><span>3</span><strong>오답 회복</strong><small>틀린 단어만 다시 보기</small></div>
+          </div>
+          <div class="student-game-inline">
+            ${
+              pending.preview_enabled
+                ? `<span class="badge">미리보기 ${escapeHtml(Math.max(0, Number(pending.preview_duration_sec || 0)))}초</span>`
+                : ""
+            }
+            ${pending.gamification_enabled ? `<span class="badge done">XP / 배지 표시</span>` : ""}
+          </div>
           <div class="row student-focus-actions">
             ${
               pending.test_session_id
-                ? `<button class="btn btn-warm" data-action="open-session" data-session-id="${pending.test_session_id}">${studentPrimaryActionLabel(pending)}</button>`
+                ? `<button class="btn btn-warm" data-action="${primaryAction}" data-session-id="${pending.test_session_id}">${studentPrimaryActionLabel(pending)}</button>`
                 : `<button class="btn btn-quiet" type="button" disabled>${studentPrimaryActionLabel(pending)}</button>`
+            }
+            ${
+              pending.test_session_id
+                ? `<button class="btn btn-quiet" data-action="open-session" data-session-id="${pending.test_session_id}">${
+                    pending.test_session_status === "IN_PROGRESS" ? "테스트 이어가기" : "바로 테스트"
+                  }</button>`
+                : ""
             }
             ${
               pending.test_session_status === "COMPLETED"
@@ -1075,29 +1395,36 @@
       `
       : `
         <section class="paper student-focus-card student-focus-card-empty">
-          <p class="student-focus-kicker">Today's Task</p>
+          <p class="student-focus-kicker">오늘 학습</p>
           <h2 class="student-focus-title">지금 바로 시작할 과제가 없습니다.</h2>
           <p class="student-focus-copy">오늘 해야 할 과제를 모두 정리했습니다. 최근 결과를 복습하거나 다음 배정을 기다리면 됩니다.</p>
         </section>
       `;
 
-    const secondaryCards = remainingItems
+    const visibleTaskItems = remainingItems.slice(0, 2);
+    const hiddenTaskCount = Math.max(0, remainingItems.length - visibleTaskItems.length);
+    const secondaryCards = visibleTaskItems
       .map((item) => {
         const hasSession = Boolean(item.test_session_id);
-        const actionLabel = item.test_session_status === "IN_PROGRESS" ? "이어서 풀기" : "집중 시험 시작";
+        const actionLabel =
+          item.test_session_status === "IN_PROGRESS"
+            ? "이어서 풀기"
+            : item.preview_enabled && !item.preview_completed_at
+              ? "미리보기 후 시작"
+              : "집중 시험 시작";
 
         return `
-          <article class="card student-queue-card ${item.status === "MISSED" ? "priority" : ""}">
-            <div class="row row-between">
-              <div>
-                <p class="student-queue-label">${studentQueueLabel(item)}</p>
-                <p class="student-queue-title">${escapeHtml(item.source_name)}</p>
-              </div>
-              ${statusBadge(item.status)}
+          <article class="student-task-row ${item.status === "MISSED" ? "priority" : ""}">
+            <div class="student-task-main">
+              <p class="student-queue-label">${studentQueueLabel(item)}</p>
+              <p class="student-queue-title">${escapeHtml(item.source_name)}</p>
+              <p class="meta">Lesson ${item.range_start_lesson}-${item.range_end_lesson} / ${item.question_count}문항</p>
             </div>
-            <p class="meta">배정: ${fmtDate(item.publish_at)} | 마감: ${fmtDate(item.due_at)}</p>
-            <p class="meta">범위: Lesson ${item.range_start_lesson}-${item.range_end_lesson} / ${item.question_count}문항</p>
-            <div class="row">
+            <div class="student-task-side">
+              ${statusBadge(item.status)}
+              <p class="meta">마감 ${fmtDate(item.due_at)}</p>
+            </div>
+            <div class="student-task-actions">
               ${hasSession ? `<button class="btn btn-quiet" data-action="open-session" data-session-id="${item.test_session_id}">${actionLabel}</button>` : `<button class="btn btn-quiet" type="button" disabled>시험 준비중</button>`}
               ${item.test_session_status === "COMPLETED" ? `<span class="badge done">점수 ${item.score ?? 0}/100</span>` : ""}
             </div>
@@ -1105,31 +1432,88 @@
         `;
       })
       .join("");
-
-    studentView.innerHTML = `
-      ${studentResultSummaryMarkup()}
-      ${primaryCard}
-      <section class="paper">
+    const archivedTaskHint = hiddenTaskCount
+      ? `<p class="meta student-task-more">나머지 ${hiddenTaskCount}개는 우선순위가 낮아 접어 두었습니다.</p>`
+      : "";
+    const reviewPanel = `
+      <section class="paper student-panel-card">
         <div class="paper-head">
-          <h2>학생 숙제 대시보드</h2>
-          <p>오늘 해야 할 한 가지를 먼저 보여주고, 나머지 과제는 이어서 확인할 수 있게 정리했습니다.</p>
+          <h2>오답 복습</h2>
+          <p>틀린 단어만 한 묶음씩 넘기며 확인합니다.</p>
         </div>
-        <div class="kpi-grid">
+        <div class="student-queue-grid">
+          ${studentReviewTaskMarkup(reviewTask) || `<article class="card"><p class="student-queue-title">열린 오답 복습이 없습니다.</p><p class="meta">테스트를 마치면 틀린 단어가 이곳에 모입니다.</p></article>`}
+          ${studentGrowthCardMarkup(growth)}
+        </div>
+      </section>
+    `;
+    const progressPanel = `
+      ${studentGameProfileMarkup(gameProfile) || `<section class="paper student-game-panel"><p class="student-focus-kicker">성장</p><h2>아직 성장 기록이 없습니다.</h2><p class="meta">테스트를 완료하면 XP와 연속 학습이 기록됩니다.</p></section>`}
+      ${studentLearningCoachMarkup(learningSummary)}
+      <section class="paper student-panel-card student-progress-summary">
+        <div class="kpi-grid student-kpi-screen">
           <article class="kpi"><p class="kpi-label">전체 과제</p><p class="kpi-value">${kpis.total}</p></article>
           <article class="kpi"><p class="kpi-label">진행 필요</p><p class="kpi-value">${kpis.active}</p></article>
           <article class="kpi"><p class="kpi-label">완료</p><p class="kpi-value">${kpis.completed}</p></article>
-          <article class="kpi danger"><p class="kpi-label">미완료 누적</p><p class="kpi-value">${kpis.missed}</p></article>
+          <article class="kpi danger"><p class="kpi-label">미완료</p><p class="kpi-value">${kpis.missed}</p></article>
         </div>
-        <div class="paper-head student-secondary-head">
-          <h2>이어서 볼 과제</h2>
-          <p>주과제 다음 순서로 정리된 과제들입니다.</p>
+      </section>
+    `;
+    const tasksPanel = `
+      <section class="paper student-panel-card">
+        <div class="paper-head">
+          <h2>과제 선택</h2>
+          <p>다른 과제로 이동할 때만 열어 보면 됩니다.</p>
         </div>
-        <div class="student-queue-grid">${secondaryCards || `<div class="note-lines">현재 추가로 확인할 과제가 없습니다.</div>`}</div>
+        <div class="student-task-list">${secondaryCards || `<div class="note-lines">현재 추가로 확인할 과제가 없습니다.</div>`}</div>
+        ${archivedTaskHint}
       </section>
     `;
 
+    studentView.innerHTML = `
+      ${studentResultSummaryMarkup()}
+      <section class="student-screen-shell">
+        <nav class="student-screen-tabs" role="tablist" aria-label="학생 화면 이동">
+          ${studentDashboardPanelButton("study", "학습", activeScreen)}
+          ${studentDashboardPanelButton("review", "복습", activeScreen)}
+          ${studentDashboardPanelButton("progress", "성장", activeScreen)}
+          ${studentDashboardPanelButton("tasks", "과제", activeScreen)}
+        </nav>
+        ${studentDashboardPanel("study", activeScreen, primaryCard)}
+        ${studentDashboardPanel("review", activeScreen, reviewPanel)}
+        ${studentDashboardPanel("progress", activeScreen, progressPanel)}
+        ${studentDashboardPanel("tasks", activeScreen, tasksPanel)}
+      </section>
+    `;
+
+    const tabButtons = Array.from(studentView.querySelectorAll("[data-student-screen]"));
+    tabButtons.forEach((btn, index) => {
+      btn.addEventListener("click", () => activateStudentDashboardPanel(btn.dataset.studentScreen));
+      btn.addEventListener("keydown", (event) => {
+        const keyMap = {
+          ArrowRight: Math.min(index + 1, tabButtons.length - 1),
+          ArrowLeft: Math.max(index - 1, 0),
+          Home: 0,
+          End: tabButtons.length - 1,
+        };
+        if (!(event.key in keyMap)) return;
+        event.preventDefault();
+        const nextButton = tabButtons[keyMap[event.key]];
+        nextButton.focus();
+        activateStudentDashboardPanel(nextButton.dataset.studentScreen);
+      });
+    });
+
+    studentView.querySelectorAll("[data-action='open-memorize']").forEach((btn) => {
+      btn.addEventListener("click", () => openStudentMemorizeSession(btn.dataset.sessionId));
+    });
+
     studentView.querySelectorAll("[data-action='open-session']").forEach((btn) => {
       btn.addEventListener("click", () => openStudentSession(btn.dataset.sessionId));
+    });
+
+    studentView.querySelectorAll("[data-action='open-review-set']").forEach((btn) => {
+      btn.addEventListener("click", () => openStudentReviewSet(btn.dataset.reviewSetId));
     });
 
     const resultBtn = document.getElementById("openStudentResultBtn");
@@ -1140,22 +1524,60 @@
     const reviewBtn = document.getElementById("openStudentReviewBtn");
     if (reviewBtn) {
       reviewBtn.addEventListener("click", () => {
-        state.studentReview = {
-          batchIndex: 0,
-          batches: getReviewBatches(state.studentResult?.wrongItems || []),
-        };
+        if (state.studentResult?.reviewSet?.id) {
+          openStudentReviewSet(state.studentResult.reviewSet.id);
+          return;
+        }
+
+        state.studentReview = buildStudentReviewState({
+          items: state.studentResult?.wrongItems || [],
+        });
         navigateToStudentReview();
       });
     }
   }
 
-  async function ensureStudentExamLoaded(sessionId) {
-    if (state.studentExam?.sessionId === sessionId && Array.isArray(state.studentExam.questions)) {
+  async function ensureStudentPreviewLoaded(sessionId) {
+    if (state.studentPreview?.sessionId === sessionId && Array.isArray(state.studentPreview.cards)) {
       return;
     }
 
-    await api(`/students/test-sessions/${sessionId}/start`, { method: "POST", body: {} });
+    const data = await api(`/students/test-sessions/${sessionId}/preview`);
+    let previewStartedAt = data.previewStartedAt;
+    if (data.previewEnabled && !previewStartedAt) {
+      const started = await api(`/students/test-sessions/${sessionId}/preview/start`, {
+        method: "POST",
+        body: {},
+      });
+      previewStartedAt = started.previewStartedAt;
+    }
+
+    state.studentPreview = {
+      sessionId,
+      sourceName: data.sourceName,
+      previewEnabled: Boolean(data.previewEnabled),
+      previewDurationSec: Number(data.previewDurationSec || 0),
+      previewScope: data.previewScope || "ALL",
+      previewStartedAt: previewStartedAt || new Date().toISOString(),
+      previewCompletedAt: data.previewCompletedAt || null,
+      cards: data.cards || [],
+      index: 0,
+    };
+  }
+
+  async function ensureStudentExamLoaded(sessionId) {
+    if (state.studentExam?.sessionId === sessionId && Array.isArray(state.studentExam.questions)) {
+      return true;
+    }
+
     const data = await api(`/students/test-sessions/${sessionId}/questions`);
+    if (data.session?.previewEnabled && !data.session?.previewCompletedAt) {
+      await ensureStudentPreviewLoaded(sessionId);
+      return false;
+    }
+
+    await api(`/students/test-sessions/${sessionId}/start`, { method: "POST", body: {} });
+    const latestData = data.session?.startedAt ? data : await api(`/students/test-sessions/${sessionId}/questions`);
 
     let answers = {};
     const saved = localStorage.getItem(examDraftKey(sessionId));
@@ -1167,20 +1589,52 @@
       }
     }
 
-    const firstUnanswered = data.questions.findIndex((q) => !answers[q.id]);
+    const firstUnanswered = latestData.questions.findIndex((q) => !answers[q.id]);
     state.studentExam = {
       sessionId,
-      session: data.session,
-      questions: data.questions,
+      session: latestData.session,
+      questions: latestData.questions,
       index: firstUnanswered >= 0 ? firstUnanswered : 0,
       answers,
       autoSubmitting: false,
     };
+    return true;
+  }
+
+  async function openStudentReviewSet(reviewSetId) {
+    try {
+      const data = await api(`/students/review-sets/${reviewSetId}`);
+      state.studentReview = buildStudentReviewState(data.reviewSet);
+      navigateToStudentReview();
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  async function openStudentMemorizeSession(sessionId) {
+    try {
+      await ensureStudentPreviewLoaded(sessionId);
+      navigateToStudentPreview(sessionId);
+    } catch (err) {
+      toast(err.message);
+    }
   }
 
   async function openStudentSession(sessionId) {
     try {
-      await ensureStudentExamLoaded(sessionId);
+      const items = state.studentDashboard?.items || [];
+      const currentAssignment = items.find((item) => item.test_session_id === sessionId);
+      if (currentAssignment?.preview_enabled && !currentAssignment?.preview_completed_at) {
+        await ensureStudentPreviewLoaded(sessionId);
+        navigateToStudentPreview(sessionId);
+        return;
+      }
+
+      const readyForExam = await ensureStudentExamLoaded(sessionId);
+      if (!readyForExam) {
+        navigateToStudentPreview(sessionId);
+        return;
+      }
       navigateToStudentExam(sessionId);
     } catch (err) {
       toast(err.message);
@@ -1217,8 +1671,140 @@
     state.studentExamTimerId = window.setInterval(syncStudentExamTimer, 1000);
   }
 
+  function syncStudentPreviewTimer() {
+    const preview = state.studentPreview;
+    if (!preview) return;
+    const countdownEl = document.getElementById("previewCountdown");
+    const startBtn = document.getElementById("startPreviewExamBtn");
+    const remainingSeconds = getStudentPreviewRemainingSeconds(preview);
+
+    if (countdownEl) {
+      countdownEl.textContent = remainingSeconds > 0 ? formatDuration(remainingSeconds) : "준비 완료";
+      countdownEl.classList.toggle("danger-text", remainingSeconds > 0 && remainingSeconds <= 10);
+    }
+
+    if (startBtn) {
+      startBtn.disabled = false;
+      startBtn.textContent = remainingSeconds > 0 ? `바로 테스트 (${formatDuration(remainingSeconds)})` : "테스트 시작";
+    }
+  }
+
+  function mountStudentPreviewTimer() {
+    clearStudentPreviewTimer();
+    syncStudentPreviewTimer();
+    if (getStudentPreviewRemainingSeconds() <= 0) return;
+    state.studentPreviewTimerId = window.setInterval(syncStudentPreviewTimer, 1000);
+  }
+
+  async function completeStudentPreview() {
+    if (!state.studentPreview) return;
+
+    try {
+      const result = await api(`/students/test-sessions/${state.studentPreview.sessionId}/preview/complete`, {
+        method: "POST",
+        body: {},
+      });
+      const sessionId = state.studentPreview.sessionId;
+      clearStudentPreviewTimer();
+      state.studentPreview.previewCompletedAt = result.previewCompletedAt;
+      state.studentPreview = null;
+      const readyForExam = await ensureStudentExamLoaded(sessionId);
+      if (readyForExam) {
+        navigateToStudentExam(sessionId);
+      }
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  function renderStudentPreviewScreen() {
+    clearStudentExamTimer();
+    if (!state.studentPreview) {
+      navigateToStudentDashboard({ replace: true });
+      return;
+    }
+
+    const cards = state.studentPreview.cards || [];
+    const safeIndex = Math.max(0, Math.min(state.studentPreview.index || 0, Math.max(cards.length - 1, 0)));
+    state.studentPreview.index = safeIndex;
+    const current = cards[safeIndex];
+    const remainingSeconds = getStudentPreviewRemainingSeconds(state.studentPreview);
+
+    studentView.innerHTML = `
+      <section class="exam-screen reveal">
+        <article class="exam-stage preview-stage">
+          <div class="exam-stage-head row row-between">
+            <div>
+              <p class="exam-eyebrow">빠른 암기</p>
+              <h2>카드 넘기며 외우기</h2>
+              <p class="meta">한 화면에 한 단어만 보고, 뜻을 확인한 뒤 바로 테스트로 넘어갑니다.</p>
+            </div>
+            <div class="row">
+              <span class="badge">${escapeHtml(state.studentPreview.sourceName || "단어장")}</span>
+              <button id="previewDashboardBtn" class="btn btn-quiet" type="button">대시보드로</button>
+            </div>
+          </div>
+
+          <div class="exam-summary">
+            <div>
+              <p class="meta">현재 카드</p>
+              <p><strong>${cards.length ? `${safeIndex + 1} / ${cards.length}` : "-"}</strong></p>
+            </div>
+            <div>
+              <p class="meta">미리보기 범위</p>
+              <p><strong>${escapeHtml(previewScopeLabel(state.studentPreview.previewScope || "ALL"))}</strong></p>
+            </div>
+            <div>
+              <p class="meta">권장 시간</p>
+              <p><strong>${escapeHtml(Math.max(0, Number(state.studentPreview.previewDurationSec || 0)))}초</strong></p>
+            </div>
+            <div>
+              <p class="meta">시작 가능</p>
+              <p><strong id="previewCountdown">${remainingSeconds > 0 ? formatDuration(remainingSeconds) : "준비 완료"}</strong></p>
+            </div>
+          </div>
+
+          ${
+            current
+              ? `
+                <div class="preview-card">
+                  <p class="preview-word">${escapeHtml(current.word)}</p>
+                  <p class="preview-meaning">${escapeHtml(current.meaning || "-")}</p>
+                  ${current.exampleSentence ? `<p class="preview-example">${escapeHtml(current.exampleSentence)}</p>` : ""}
+                  ${current.hint ? `<p class="question-hint">힌트: ${escapeHtml(current.hint)}</p>` : ""}
+                </div>
+              `
+              : `<div class="note-lines">미리보기 카드가 없습니다. 바로 시험으로 넘어갈 수 있습니다.</div>`
+          }
+
+          <div class="row row-between exam-actions exam-actions-primary">
+            <div class="row">
+              <button id="previewPrevBtn" class="btn btn-quiet" type="button" ${safeIndex === 0 ? "disabled" : ""}>이전</button>
+              <button id="previewNextBtn" class="btn btn-quiet" type="button" ${safeIndex >= cards.length - 1 ? "disabled" : ""}>다음</button>
+            </div>
+            <button id="startPreviewExamBtn" class="btn btn-warm" type="button">테스트 시작</button>
+          </div>
+        </article>
+      </section>
+    `;
+
+    mountStudentPreviewTimer();
+
+    document.getElementById("previewDashboardBtn").addEventListener("click", () => navigateToStudentDashboard());
+    document.getElementById("previewPrevBtn").addEventListener("click", () => {
+      state.studentPreview.index -= 1;
+      renderStudentPreviewScreen();
+    });
+    document.getElementById("previewNextBtn").addEventListener("click", () => {
+      state.studentPreview.index += 1;
+      renderStudentPreviewScreen();
+    });
+    document.getElementById("startPreviewExamBtn").addEventListener("click", completeStudentPreview);
+  }
+
   function renderStudentExamScreen() {
     if (!state.studentExam) return;
+    clearStudentPreviewTimer();
 
     const { sessionId, questions, index, answers, session } = state.studentExam;
     if (!questions.length) {
@@ -1253,9 +1839,9 @@
         <article class="exam-stage">
           <div class="exam-stage-head row row-between">
             <div>
-              <p class="exam-eyebrow">Focus Mode</p>
-              <h2>단어 시험</h2>
-              <p class="meta">대시보드를 잠시 벗어나 현재 문제에만 집중하는 화면입니다.</p>
+              <p class="exam-eyebrow">테스트</p>
+              <h2>한 문제씩 풀기</h2>
+              <p class="meta">스크롤 없이 답을 입력하고 다음 문제로 넘어갑니다.</p>
             </div>
             <div class="row">
               <span class="badge">답변 ${answeredCount}/${questions.length}</span>
@@ -1263,11 +1849,7 @@
             </div>
           </div>
 
-          <div class="exam-summary">
-            <div>
-              <p class="meta">Session</p>
-              <p class="mono">${escapeHtml(sessionId)}</p>
-            </div>
+          <div class="exam-summary exam-summary-compact">
             <div>
               <p class="meta">진행률</p>
               <p><strong>${percent}%</strong></p>
@@ -1362,6 +1944,7 @@
   }
 
   function renderStudentResultScreen() {
+    clearStudentPreviewTimer();
     clearStudentExamTimer();
     if (!state.studentResult) {
       navigateToStudentDashboard({ replace: true });
@@ -1369,16 +1952,15 @@
     }
 
     const result = state.studentResult;
-    const wrongList = (result.wrongItems || [])
+    const wrongItems = result.wrongItems || [];
+    const wrongPreviewList = wrongItems
+      .slice(0, 3)
       .map(
         (item, idx) => `
-          <article class="review-card">
-            <p class="meta">오답 ${idx + 1}</p>
-            <p class="question-main">${escapeHtml(item.prompt)}</p>
-            <p class="meta">내 답안: ${escapeHtml(item.response || "미응답")}</p>
-            <p><strong>정답:</strong> ${escapeHtml(item.expectedAnswer)}</p>
-            <p class="meta">뜻: ${escapeHtml(item.meaningPrimary || "-")}</p>
-          </article>
+          <li>
+            <strong>${idx + 1}. ${escapeHtml(item.expectedAnswer)}</strong>
+            <span>내 답: ${escapeHtml(item.response || "미응답")} / 뜻: ${escapeHtml(item.meaningPrimary || "-")}</span>
+          </li>
         `
       )
       .join("");
@@ -1388,7 +1970,7 @@
         <article class="exam-stage">
           <div class="exam-stage-head row row-between">
             <div>
-              <p class="exam-eyebrow">Result Summary</p>
+              <p class="exam-eyebrow">결과</p>
               <h2>시험 결과</h2>
               <p class="meta">점수와 오답을 바로 확인하고, 필요하면 오답노트로 이어집니다.</p>
             </div>
@@ -1404,6 +1986,17 @@
             <div><p class="meta">보충 과제</p><p><strong>${result.supplementalCreated ? "자동 생성" : "없음"}</strong></p></div>
           </div>
 
+          ${
+            result.earnedXp || (result.newBadges || []).length
+              ? `
+                <div class="student-game-inline">
+                  ${result.earnedXp ? `<span class="badge done">XP +${escapeHtml(result.earnedXp)}</span>` : ""}
+                  ${studentBadgePillMarkup(result.newBadges || [])}
+                </div>
+              `
+              : ""
+          }
+
           <div class="result-message ${result.wrongCount > 0 ? "warn" : "success"}">
             ${
               result.wrongCount > 0
@@ -1413,16 +2006,21 @@
           </div>
 
           ${
-            wrongList
-              ? `<div class="review-card-grid">${wrongList}</div>`
+            wrongPreviewList
+              ? `<ul class="result-mini-list result-screen-list">${wrongPreviewList}</ul>`
               : `<div class="note-lines">이번 시험의 오답이 없습니다.</div>`
+          }
+          ${
+            wrongItems.length > 3
+              ? `<p class="meta">나머지 ${escapeHtml(wrongItems.length - 3)}개는 오답 복습 화면에서 한 묶음씩 확인합니다.</p>`
+              : ""
           }
 
           <div class="row row-between exam-actions">
             <div class="row">
               ${
                 result.wrongCount > 0
-                  ? `<button id="openReviewModeBtn" class="btn" type="button">오답노트 열기</button>`
+                  ? `<button id="openReviewModeBtn" class="btn" type="button">오답 복습 시작</button>`
                   : ""
               }
             </div>
@@ -1440,16 +2038,21 @@
     const reviewBtn = document.getElementById("openReviewModeBtn");
     if (reviewBtn) {
       reviewBtn.addEventListener("click", () => {
-        state.studentReview = {
-          batchIndex: 0,
-          batches: getReviewBatches(result.wrongItems || []),
-        };
+        if (result.reviewSet?.id) {
+          openStudentReviewSet(result.reviewSet.id);
+          return;
+        }
+
+        state.studentReview = buildStudentReviewState({
+          items: result.wrongItems || [],
+        });
         navigateToStudentReview();
       });
     }
   }
 
   function renderStudentReviewScreen() {
+    clearStudentPreviewTimer();
     clearStudentExamTimer();
     if (!state.studentReview?.batches?.length) {
       navigateToStudentResult();
@@ -1485,7 +2088,7 @@
         <article class="exam-stage">
           <div class="exam-stage-head row row-between">
             <div>
-              <p class="exam-eyebrow">Wrong Answer Note</p>
+              <p class="exam-eyebrow">오답 노트</p>
               <h2>오답노트</h2>
               <p class="meta">한 번에 3문제씩 묶어서 다시 봅니다.</p>
             </div>
@@ -1494,19 +2097,42 @@
               <button id="reviewResultBtn" class="btn btn-quiet" type="button">결과로</button>
             </div>
           </div>
+          ${
+            state.studentReview.rewards
+              ? `
+                <div class="student-game-inline">
+                  ${state.studentReview.rewards.earnedXp ? `<span class="badge done">XP +${escapeHtml(state.studentReview.rewards.earnedXp)}</span>` : ""}
+                  ${studentBadgePillMarkup(state.studentReview.rewards.newlyGrantedBadges || [])}
+                </div>
+              `
+              : ""
+          }
           <div class="review-card-grid">${cards}</div>
           <div class="row row-between exam-actions">
             <div class="row">
               <button id="reviewPrevBtn" class="btn btn-quiet" type="button" ${safeBatchIndex === 0 ? "disabled" : ""}>이전 묶음</button>
               <button id="reviewNextBtn" class="btn btn-quiet" type="button" ${safeBatchIndex === batches.length - 1 ? "disabled" : ""}>다음 묶음</button>
             </div>
-            <button id="reviewDashboardBtn" class="btn btn-warm" type="button">대시보드로</button>
+            <div class="row">
+              ${
+                state.studentReview.id && state.studentReview.status !== "COMPLETED" && safeBatchIndex === batches.length - 1
+                  ? `<button id="reviewCompleteBtn" class="btn btn-warm" type="button">회복 완료하기</button>`
+                  : ""
+              }
+              <button id="reviewDashboardBtn" class="btn ${state.studentReview.id && state.studentReview.status !== "COMPLETED" && safeBatchIndex === batches.length - 1 ? "btn-quiet" : "btn-warm"}" type="button">대시보드로</button>
+            </div>
           </div>
         </article>
       </section>
     `;
 
-    document.getElementById("reviewResultBtn").addEventListener("click", () => navigateToStudentResult());
+    document.getElementById("reviewResultBtn").addEventListener("click", () => {
+      if (state.studentResult) {
+        navigateToStudentResult();
+        return;
+      }
+      navigateToStudentDashboard();
+    });
     document.getElementById("reviewDashboardBtn").addEventListener("click", () => navigateToStudentDashboard({ replace: true }));
     document.getElementById("reviewPrevBtn").addEventListener("click", () => {
       state.studentReview.batchIndex -= 1;
@@ -1516,6 +2142,28 @@
       state.studentReview.batchIndex += 1;
       renderStudentReviewScreen();
     });
+
+    const completeBtn = document.getElementById("reviewCompleteBtn");
+    if (completeBtn) {
+      completeBtn.addEventListener("click", async () => {
+        try {
+          const result = await api(`/students/review-sets/${state.studentReview.id}/complete`, {
+            method: "POST",
+            body: {},
+          });
+          state.studentReview = {
+            ...buildStudentReviewState(result.reviewSet),
+            batchIndex: safeBatchIndex,
+            rewards: result.rewards,
+            status: result.reviewSet.status,
+          };
+          toast(`오답 복습 완료${result.rewards?.earnedXp ? ` / XP +${result.rewards.earnedXp}` : ""}`);
+          renderStudentReviewScreen();
+        } catch (err) {
+          toast(err.message);
+        }
+      });
+    }
   }
 
   async function submitStudentSession(options = {}) {
@@ -1542,6 +2190,7 @@
       });
 
       clearStudentExamTimer();
+      clearStudentPreviewTimer();
       localStorage.removeItem(examDraftKey(sessionId));
       state.studentResult = {
         sessionId,
@@ -1550,13 +2199,18 @@
         correctCount: result.correctCount,
         wrongCount: result.wrongCount,
         wrongItems: result.wrongItems || [],
+        reviewSet: result.reviewSet || null,
         elapsedSeconds: result.elapsedSeconds,
         supplementalCreated: result.supplementalCreated,
         supplementalAssignmentId: result.supplementalAssignmentId,
         supplementalSessionId: result.supplementalSessionId,
         supplementalDueAt: result.supplementalDueAt,
+        earnedXp: result.earnedXp || 0,
+        newBadges: result.newBadges || [],
+        gameProfile: result.gameProfile || null,
       };
       state.studentReview = null;
+      state.studentPreview = null;
       state.studentExam = null;
       const extraMsg = result.wrongCount > 0 ? ` / 오답 ${result.wrongCount}` : " / 만점";
       const autoMsg = options.autoSubmitted ? " / 시간 종료 자동 제출" : "";
@@ -1657,29 +2311,35 @@
 
   async function renderTeacher(forceFetch = true) {
     syncTeacherViewModeForViewport();
-    renderViewSkeleton(teacherView, "teacher");
+    const shouldFetchMeta = forceFetch || !state.teacherMeta;
+    const cancelSkeleton = shouldFetchMeta || forceFetch || !state.teacherSettings ? scheduleViewSkeleton(teacherView, "teacher") : null;
 
-    if (forceFetch || !state.teacherMeta) {
-      state.teacherMeta = await api("/teacher/meta");
-    }
+    try {
+      if (shouldFetchMeta) {
+        state.teacherMeta = await api("/teacher/meta", { showLoading: false });
+      }
 
-    const ownerTeacherId = getBoardTeacherId(state.teacherMeta);
-    state.teacherSettingsOwnerId = ownerTeacherId;
+      const ownerTeacherId = getBoardTeacherId(state.teacherMeta);
+      state.teacherSettingsOwnerId = ownerTeacherId;
 
-    const assignmentsPath =
-      state.role === "ADMIN" && ownerTeacherId ? `/teacher/assignments?teacherId=${encodeURIComponent(ownerTeacherId)}` : "/teacher/assignments";
-    const settingsPath =
-      ownerTeacherId && state.role === "ADMIN"
-        ? `/teacher/settings?teacherId=${encodeURIComponent(ownerTeacherId)}`
-        : "/teacher/settings";
+      const assignmentsPath =
+        state.role === "ADMIN" && ownerTeacherId ? `/teacher/assignments?teacherId=${encodeURIComponent(ownerTeacherId)}` : "/teacher/assignments";
+      const settingsPath =
+        ownerTeacherId && state.role === "ADMIN"
+          ? `/teacher/settings?teacherId=${encodeURIComponent(ownerTeacherId)}`
+          : "/teacher/settings";
 
-    if (forceFetch || !state.teacherSettings || state.teacherSettings.ownerTeacherId !== ownerTeacherId) {
-      const [assignmentsRes, settingsRes] = await Promise.all([
-        api(assignmentsPath),
-        ownerTeacherId ? api(settingsPath) : Promise.resolve(null),
-      ]);
-      state.teacherAssignments = assignmentsRes.items || [];
-      state.teacherSettings = settingsRes;
+      if (forceFetch || !state.teacherSettings || state.teacherSettings.ownerTeacherId !== ownerTeacherId) {
+        const [assignmentsRes, settingsRes] = await Promise.all([
+          api(assignmentsPath, { showLoading: false }),
+          ownerTeacherId ? api(settingsPath, { showLoading: false }) : Promise.resolve(null),
+        ]);
+        state.teacherAssignments = assignmentsRes.items || [];
+        state.teacherLearningOverview = assignmentsRes.learningOverview || null;
+        state.teacherSettings = settingsRes;
+      }
+    } finally {
+      if (cancelSkeleton) cancelSkeleton();
     }
 
     renderTeacherBoard();
@@ -2155,6 +2815,60 @@
     `;
   }
 
+  function teacherLearningOverviewMarkup(overview) {
+    if (!overview) return "";
+    const riskRows = Array.isArray(overview.riskStudents) && overview.riskStudents.length
+      ? overview.riskStudents
+          .map(
+            (student) => `
+              <li>
+                <strong>${escapeHtml(student.name)}</strong>
+                <span>숙련도 ${escapeHtml(student.avgMastery || 0)}% · 복습 ${escapeHtml(student.dueCount || 0)} · 약점 ${escapeHtml(student.weakCount || 0)}</span>
+              </li>
+            `
+          )
+          .join("")
+      : `<li><strong>안정</strong><span>지금 바로 개입할 학생은 없습니다.</span></li>`;
+    const weakWords = Array.isArray(overview.weakWords) && overview.weakWords.length
+      ? overview.weakWords
+          .map(
+            (word) => `
+              <li class="teacher-weak-word">
+                <span><strong>${escapeHtml(word.lemma)}</strong><small>${escapeHtml(word.studentName || "")} · ${escapeHtml(word.meaning || "")}</small></span>
+                <em>${escapeHtml(word.masteryScore || 0)}%</em>
+              </li>
+            `
+          )
+          .join("")
+      : `<li class="teacher-weak-word"><span><strong>분석 대기</strong><small>제출이 쌓이면 약점 단어가 표시됩니다.</small></span></li>`;
+
+    return `
+      <div class="teacher-learning-board">
+        <div class="teacher-learning-copy">
+          <p class="teacher-overview-label">Adaptive Vocabulary</p>
+          <h3>출제 알고리즘 상태</h3>
+          <p>${escapeHtml(overview.message || "학생별 단어 숙련도를 추적합니다.")}</p>
+        </div>
+        <div class="teacher-learning-metrics">
+          <article><span>추적 학생</span><strong>${escapeHtml(overview.trackedStudentCount || 0)}</strong></article>
+          <article><span>평균 숙련도</span><strong>${escapeHtml(overview.avgMastery || 0)}%</strong></article>
+          <article><span>복습 대기</span><strong>${escapeHtml(overview.dueCount || 0)}</strong></article>
+          <article><span>약점 단어</span><strong>${escapeHtml(overview.weakCount || 0)}</strong></article>
+        </div>
+        <div class="teacher-learning-lists">
+          <section>
+            <h4>개입 우선 학생</h4>
+            <ul>${riskRows}</ul>
+          </section>
+          <section>
+            <h4>반복 출제 후보</h4>
+            <ul>${weakWords}</ul>
+          </section>
+        </div>
+      </div>
+    `;
+  }
+
   function teacherPriorityCardsMarkup(items) {
     if (items.length === 0) {
       return '<div class="note-lines">지금 바로 조치할 과제가 없습니다. 오늘 운영은 안정적인 상태입니다.</div>';
@@ -2254,6 +2968,7 @@
     const activeTeacherId = getBoardTeacherId(meta);
     const activeTeacher = meta?.teachers?.find((teacher) => teacher.id === activeTeacherId) || null;
     const allItems = [...state.teacherAssignments];
+    const learningOverview = state.teacherLearningOverview;
     const items = getFilteredTeacherAssignments();
     const stats = buildTeacherStats(allItems);
     const priorityItems = getTeacherPriorityAssignments(allItems);
@@ -2265,6 +2980,10 @@
     const defaultDueHours = getDefaultDueHours();
     const defaultPublishAt = toInputDateTime(new Date().toISOString());
     const defaultDueAt = buildDueAtInputValue(defaultPublishAt, defaultDueHours);
+    const defaultPreviewEnabled = getDefaultPreviewEnabled();
+    const defaultPreviewDurationSec = getDefaultPreviewDurationSec();
+    const defaultPreviewScope = getDefaultPreviewScope();
+    const defaultGamificationEnabled = getDefaultGamificationEnabled();
     const defaultSupplementQuestions = Number(getTeacherSettingsValue("supplement_max_questions", 10));
     const defaultSupplementDueHours = Number(getTeacherSettingsValue("supplement_due_hours", 24));
 
@@ -2318,6 +3037,23 @@
           `;
         }
 
+        if (definition.type === "string" && Array.isArray(definition.options)) {
+          return `
+            <label class="setting-card">
+              <span class="setting-label">${escapeHtml(definition.label)}</span>
+              <select name="${key}">
+                ${definition.options
+                  .map(
+                    (option) =>
+                      `<option value="${escapeHtml(option.value)}" ${settingsValues[key] === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>`
+                  )
+                  .join("")}
+              </select>
+              <small class="setting-desc">${escapeHtml(definition.description || "")}</small>
+            </label>
+          `;
+        }
+
         return `
           <label class="setting-card">
             <span class="setting-label">${escapeHtml(definition.label)}</span>
@@ -2367,6 +3103,7 @@
         <div class="teacher-overview-grid">
           ${teacherOverviewCardsMarkup(stats)}
         </div>
+        ${teacherLearningOverviewMarkup(learningOverview)}
         ${teacherQuickNav}
         <div class="teacher-priority-grid">
           ${teacherPriorityCardsMarkup(priorityItems)}
@@ -2444,6 +3181,39 @@
             <label>문제 수<input type="number" name="questionCount" min="1" value="8" required /></label>
             <label>배정 시각<input id="assignmentPublishAtInput" type="datetime-local" name="publishAt" value="${defaultPublishAt}" required /></label>
             <label>마감 시각<input id="assignmentDueAtInput" type="datetime-local" name="dueAt" value="${defaultDueAt}" /></label>
+            <details class="assignment-advanced full">
+              <summary>고급설정</summary>
+              <div class="settings-grid assignment-advanced-grid">
+                <label class="setting-card setting-toggle">
+                  <span class="setting-copy">
+                    <strong>시험 전 미리보기 허용</strong>
+                    <small>학생이 시험 전에 짧은 카드 미리보기를 거치도록 합니다.</small>
+                  </span>
+                  <input type="checkbox" name="previewEnabled" ${defaultPreviewEnabled ? "checked" : ""} />
+                </label>
+                <label class="setting-card">
+                  <span class="setting-label">미리보기 시간(초)</span>
+                  <input type="number" name="previewDurationSec" min="0" value="${escapeHtml(defaultPreviewDurationSec)}" />
+                  <small class="setting-desc">0초로 두면 바로 시험 시작 버튼이 열립니다.</small>
+                </label>
+                <label class="setting-card">
+                  <span class="setting-label">미리보기 범위</span>
+                  <select name="previewScope">
+                    ${previewScopeOptions()
+                      .map((option) => `<option value="${option.value}" ${option.value === defaultPreviewScope ? "selected" : ""}>${option.label}</option>`)
+                      .join("")}
+                  </select>
+                  <small class="setting-desc">전체 단어, 핵심 단어, 지난 오답 우선 중에서 선택합니다.</small>
+                </label>
+                <label class="setting-card setting-toggle">
+                  <span class="setting-copy">
+                    <strong>게이밍 요소 표시</strong>
+                    <small>XP, 연속 학습, 배지 보상을 이 과제 결과에 반영합니다.</small>
+                  </span>
+                  <input type="checkbox" name="gamificationEnabled" ${defaultGamificationEnabled ? "checked" : ""} />
+                </label>
+              </div>
+            </details>
             <div class="row full">
               <span class="badge">기본 마감: 게시 후 ${defaultDueHours}시간</span>
               <button class="btn btn-quiet" type="button" id="applyDuePresetBtn">기본 마감 적용</button>
@@ -2633,6 +3403,10 @@
         rangeEndLesson: Number(f.get("rangeEndLesson")),
         questionCount: Number(f.get("questionCount")),
         publishAt: new Date(String(f.get("publishAt"))).toISOString(),
+        previewEnabled: f.get("previewEnabled") === "on",
+        previewDurationSec: Number(f.get("previewDurationSec") || 0),
+        previewScope: String(f.get("previewScope") || "ALL"),
+        gamificationEnabled: f.get("gamificationEnabled") === "on",
       };
       if (dueAtValue) {
         payload.dueAt = new Date(dueAtValue).toISOString();
@@ -2661,6 +3435,11 @@
 
           if (definition.type === "boolean") {
             settings[key] = f.get(key) === "on";
+            return;
+          }
+
+          if (definition.type === "string") {
+            settings[key] = String(f.get(key) || "");
             return;
           }
 
@@ -3117,8 +3896,13 @@
   }
 
   async function renderParent() {
-    renderViewSkeleton(parentView, "parent");
-    const data = await api("/parents/me/reports");
+    const cancelSkeleton = scheduleViewSkeleton(parentView, "parent");
+    let data;
+    try {
+      data = await api("/parents/me/reports", { showLoading: false });
+    } finally {
+      cancelSkeleton();
+    }
     const reports = data.reports || [];
 
     const completed = reports.filter((r) => r.payload?.result === "COMPLETED").length;
@@ -3162,6 +3946,19 @@
     if (!state.role) return;
 
     if (state.role === "STUDENT") {
+      const previewSessionId = getStudentPreviewRouteSessionId();
+      if (previewSessionId) {
+        try {
+          await ensureStudentPreviewLoaded(previewSessionId);
+          renderStudentPreviewScreen();
+        } catch (err) {
+          state.studentPreview = null;
+          toast(err.message);
+          navigateToStudentDashboard({ replace: true });
+        }
+        return;
+      }
+
       if (isStudentResultRoute()) {
         if (!state.studentResult) {
           navigateToStudentDashboard({ replace: true });
@@ -3183,7 +3980,11 @@
       const sessionId = getStudentExamRouteSessionId();
       if (sessionId) {
         try {
-          await ensureStudentExamLoaded(sessionId);
+          const readyForExam = await ensureStudentExamLoaded(sessionId);
+          if (!readyForExam) {
+            navigateToStudentPreview(sessionId);
+            return;
+          }
           renderStudentExamScreen();
         } catch (err) {
           state.studentExam = null;
@@ -3197,7 +3998,7 @@
       return;
     }
     if (["TEACHER", "ADMIN"].includes(state.role)) {
-      await renderTeacher(true);
+      await renderTeacher(!state.teacherMeta);
       return;
     }
     if (state.role === "PARENT") {
@@ -3264,14 +4065,13 @@
   }
 
   async function bootstrap() {
-    await withLoading(async () => {
-      const loggedInByLink = await tryLoginWithAccessLink();
-      if (loggedInByLink) {
-        toast("링크 로그인 성공");
-      }
-      await renderRoleView();
-    }, "단어장을 준비하는 중");
+    const loggedInByLink = await tryLoginWithAccessLink();
+    if (loggedInByLink) {
+      toast("링크 로그인 성공");
+    }
+    await renderRoleView();
   }
 
+  scheduleDeferredFonts();
   bootstrap().catch(handleRenderError);
 })();

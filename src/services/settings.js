@@ -6,14 +6,20 @@ const SETTING_DEFS = {
     type: "number",
     defaultValue: 2,
     label: "기본 과제 마감 시간",
-    description: "과제 생성 시 기본 마감 시각을 계산할 때 사용할 시간(시간 단위)",
+    description: "새 과제를 만들 때 기본 마감 시간을 몇 시간 뒤로 잡을지 정합니다.",
     min: 1,
+  },
+  adaptive_learning_enabled: {
+    type: "boolean",
+    defaultValue: true,
+    label: "적응형 단어 선택",
+    description: "오답, 복습 예정일, 숙련도, 미노출 단어를 섞어 시험 단어를 자동 선별합니다.",
   },
   supplement_min_wrong: {
     type: "number",
     defaultValue: 1,
     label: "보충 생성 최소 오답 수",
-    description: "학생 제출 후 이 수 이상 틀리면 보충 과제를 자동 생성합니다.",
+    description: "학생 제출 후 이 개수 이상 틀리면 보충 과제를 자동 생성합니다.",
     min: 1,
   },
   supplement_max_questions: {
@@ -27,39 +33,69 @@ const SETTING_DEFS = {
     type: "number",
     defaultValue: 24,
     label: "보충 과제 마감 시간",
-    description: "보충 과제 생성 후 마감까지 허용할 시간(시간 단위)",
+    description: "보충 과제 생성 후 마감까지 허용할 시간입니다.",
     min: 1,
   },
   notify_student_on_publish: {
     type: "boolean",
     defaultValue: true,
     label: "학생 배정 알림",
-    description: "과제가 게시되면 학생에게 즉시 시작 알림을 보냅니다.",
+    description: "과제가 게시되면 학생에게 시작 알림을 보냅니다.",
   },
   notify_student_on_reminder: {
     type: "boolean",
     defaultValue: true,
     label: "학생 미완료 리마인드",
-    description: "마감 후 아직 제출하지 않은 학생에게 리마인드 알림을 보냅니다.",
+    description: "마감 뒤 아직 제출하지 않은 학생에게 리마인드 알림을 보냅니다.",
   },
   student_reminder_delay_minutes: {
     type: "number",
     defaultValue: 0,
-    label: "미완료 확정 유예(분)",
-    description: "마감 후 이 시간이 지나면 MISSED 처리와 학부모 보고를 진행합니다.",
+    label: "미완료 확정 지연(분)",
+    description: "마감 후 몇 분이 지나면 미완료 처리와 보고를 진행할지 정합니다.",
     min: 0,
   },
   notify_parent_on_completed: {
     type: "boolean",
     defaultValue: true,
     label: "학부모 완료 보고",
-    description: "학생이 완료하면 점수 보고를 학부모에게 보냅니다.",
+    description: "학생이 시험을 완료하면 점수 보고를 학부모에게 보냅니다.",
   },
   notify_parent_on_missed: {
     type: "boolean",
     defaultValue: true,
     label: "학부모 미완료 보고",
-    description: "학생이 마감까지 제출하지 못하면 학부모에게 경고를 보냅니다.",
+    description: "학생이 마감까지 제출하지 않으면 학부모에게 보고를 보냅니다.",
+  },
+  default_preview_enabled: {
+    type: "boolean",
+    defaultValue: false,
+    label: "시험 전 미리보기 기본값",
+    description: "새 과제를 만들 때 시험 전 미리보기를 기본으로 켜 둘지 정합니다.",
+  },
+  default_preview_duration_sec: {
+    type: "number",
+    defaultValue: 60,
+    label: "미리보기 기본 시간(초)",
+    description: "미리보기가 켜진 과제에서 시험 시작 전 기다리는 기본 시간입니다.",
+    min: 0,
+  },
+  default_preview_scope: {
+    type: "string",
+    defaultValue: "ALL",
+    label: "미리보기 범위",
+    description: "미리보기 카드에 어떤 단어를 먼저 보여줄지 정합니다.",
+    options: [
+      { value: "ALL", label: "전체 단어" },
+      { value: "KEYWORDS", label: "핵심 단어 5개" },
+      { value: "WRONG_ONLY", label: "지난 오답 우선" },
+    ],
+  },
+  default_gamification_enabled: {
+    type: "boolean",
+    defaultValue: true,
+    label: "게이밍 요소 기본값",
+    description: "경험치, 연속 학습, 배지 보상을 과제에 표시할지 정합니다.",
   },
 };
 
@@ -196,6 +232,7 @@ function getSettingDefinitions() {
       description: definition.description,
       type: definition.type,
       min: definition.min ?? null,
+      options: definition.options ?? null,
     };
   }
 
