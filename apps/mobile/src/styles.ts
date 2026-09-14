@@ -5,6 +5,8 @@ import { colors } from "./helpers";
 export const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1 },
+  bottomTabs: { padding: 12, borderTopWidth: 1, borderTopColor: colors.line, backgroundColor: colors.card },
+  primaryActionDock: { padding: 12, backgroundColor: colors.card, borderTopWidth: 1, borderTopColor: colors.line },
   center: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12 },
   scroll: { padding: 18, paddingBottom: 40, gap: 14 },
   loginScroll: { flexGrow: 1, justifyContent: "center", padding: 18, gap: 18 },

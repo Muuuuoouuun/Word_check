@@ -19,6 +19,7 @@ const {
 const { runAutomationCycle, queueTier3ForCompletion } = require("./services/notifications");
 const { getResolvedSettings, upsertTeacherSettings, getSettingDefinitions } = require("./services/settings");
 const { getTeacherLearningOverview, isAnswerCorrect, recordVocabularyAnswer } = require("./services/learningEngine");
+const { startStudentSession } = require("./services/studentSessions");
 const {
   applyExamCompletionRewards,
   buildStudentDashboard,
@@ -575,7 +576,7 @@ app.get("/students/review-sets/:id", authRequired(["STUDENT"]), (req, res) => {
 
 app.post("/students/review-sets/:id/complete", authRequired(["STUDENT"]), (req, res) => {
   try {
-    const result = completeReviewSet(req.params.id, req.user.studentId);
+    const result = completeReviewSet(req.params.id, req.user.studentId, req.body.answers);
     return res.json({ ok: true, ...result });
   } catch (err) {
     return res.status(400).json({ message: err.message });
@@ -933,22 +934,11 @@ app.post("/teacher/test-sessions/:id/offline-submit", authRequired(PRIVILEGED_RO
 });
 
 app.post("/students/test-sessions/:id/start", authRequired(["STUDENT"]), (req, res) => {
-  const session = getStudentSessionContext(req.params.id);
-  if (!session) return res.status(404).json({ message: "세션을 찾을 수 없습니다." });
-  if (session.student_id !== req.user.studentId) return res.status(403).json({ message: "권한이 없습니다." });
-  if (session.preview_enabled && !session.preview_completed_at) {
-    return res.status(409).json({ message: "미리보기를 먼저 완료해야 시험을 시작할 수 있습니다." });
+  try {
+    return res.json(startStudentSession(req.params.id, req.user.studentId));
+  } catch (error) {
+    return res.status(error.status || 500).json({ message: error.status ? error.message : "시험을 시작하지 못했습니다." });
   }
-
-  db.prepare(
-    `UPDATE test_sessions
-     SET status = 'IN_PROGRESS', started_at = COALESCE(started_at, ?), updated_at = ?
-     WHERE id = ?`
-  ).run(nowIso(), nowIso(), req.params.id);
-
-  db.prepare(`UPDATE homework_assignments SET status = 'IN_PROGRESS', updated_at = ? WHERE id = ?`).run(nowIso(), session.assignment_id);
-
-  res.json({ ok: true });
 });
 
 app.post("/students/test-sessions/:id/submit", authRequired(["STUDENT"]), (req, res) => {

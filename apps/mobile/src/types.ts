@@ -25,6 +25,8 @@ export type StudentAssignment = {
   due_at: string;
   status: "SCHEDULED" | "PUBLISHED" | "IN_PROGRESS" | "COMPLETED" | "MISSED" | string;
   source_name: string;
+  preview_word?: string | null;
+  preview_meaning?: string | null;
   test_session_id: string | null;
   test_session_status: "PENDING" | "IN_PROGRESS" | "COMPLETED" | string | null;
   score: number | null;
@@ -87,6 +89,14 @@ export type ReviewSet = {
 };
 
 export type DashboardResponse = {
+  learningSummary?: {
+    trackedCount: number;
+    avgMastery: number;
+    dueNow: number;
+    weakCount: number;
+    message: string;
+    weakWords: { lemma: string; meaning: string; masteryScore: number; nextReviewAt: string | null }[];
+  };
   items: StudentAssignment[];
   reviewTask: ReviewSet | null;
   gameProfile: GameProfile | null;
@@ -171,7 +181,8 @@ export type Rewards = {
 export type CompleteReviewResponse = {
   ok: boolean;
   reviewSet: ReviewSet;
-  rewards: Rewards;
+  checks?: { itemId: string; correct: boolean }[];
+  rewards: Rewards | null;
 };
 
 export type ParentReport = {

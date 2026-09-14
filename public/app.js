@@ -962,6 +962,21 @@
     return `${pad2(minutes)}:${pad2(seconds)}`;
   }
 
+  function speakWord(word) {
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+      toast("이 브라우저에서는 발음 듣기를 지원하지 않습니다.");
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(word);
+    utterance.lang = "en-US";
+    utterance.rate = 0.85;
+    utterance.onerror = (event) => {
+      if (!["interrupted", "canceled"].includes(event.error)) toast("발음을 재생하지 못했습니다. 다시 시도해 주세요.");
+    };
+    window.speechSynthesis.speak(utterance);
+  }
+
   function shouldAutoFocusStudentExamInput() {
     return !window.matchMedia(EXAM_AUTOFOCUS_VIEWPORT_QUERY).matches && !window.matchMedia(COARSE_POINTER_QUERY).matches;
   }
@@ -1026,6 +1041,8 @@
       batches: getReviewBatches(reviewSet?.items || []),
       batchIndex: 0,
       rewards: null,
+      answers: {},
+      checks: [],
     };
   }
 
@@ -1261,9 +1278,15 @@
 
   function studentPrimaryActionLabel(item) {
     if (item.test_session_status === "IN_PROGRESS") return "이어서 테스트";
-    if (item.test_session_id) return "빠른 암기 시작";
     if (item.status === "SCHEDULED") return "열릴 때까지 기다리는 중";
+    if (item.test_session_id) return item.preview_enabled && !item.preview_completed_at ? "암기 시작" : "테스트 시작";
     return "시험 준비중";
+  }
+
+  function studentAssignmentDate(value) {
+    const date = new Date(value);
+    if (!value || Number.isNaN(date.getTime())) return "-";
+    return date.toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
   }
 
   function studentAssignmentSupportCopy(item) {
@@ -1276,7 +1299,7 @@
     }
 
     if (item.test_session_id && item.status === "PUBLISHED") {
-      return "암기 카드를 먼저 보고 바로 테스트합니다. 긴 설명 없이 한 화면씩 넘어갑니다.";
+      return "준비됐다면 테스트를 시작하세요. 단어를 먼저 확인할 수도 있습니다.";
     }
 
     if (item.status === "SCHEDULED") {
@@ -1318,7 +1341,6 @@
     const growth = data.recentGrowth || null;
     const pending = getPendingAssignment(items);
     const sortedItems = sortStudentAssignments(items);
-    const remainingItems = sortedItems.filter((item) => item.id !== pending?.id);
 
     const kpis = {
       total: items.length,
@@ -1327,8 +1349,9 @@
       completed: items.filter((i) => i.test_session_status === "COMPLETED").length,
     };
     const activeScreen = state.studentDashboardScreen || "study";
-    const primaryAction = pending?.test_session_status === "IN_PROGRESS" ? "open-session" : "open-memorize";
-    const activeFlowStep = pending?.test_session_status === "IN_PROGRESS" ? "test" : "memorize";
+    const needsPreview = pending?.preview_enabled && !pending?.preview_completed_at;
+    const primaryAction = needsPreview ? "open-memorize" : "open-session";
+    const activeFlowStep = needsPreview ? "memorize" : "test";
 
     const primaryCard = pending
       ? `
@@ -1341,14 +1364,18 @@
             ${statusBadge(pending.status)}
           </div>
           <p class="student-focus-copy">${studentAssignmentSupportCopy(pending)}</p>
+          ${pending.preview_word ? `<div class="student-word-preview">
+            <div><p class="meta">오늘 만날 단어</p><strong>${escapeHtml(pending.preview_word)}</strong><p>${escapeHtml(pending.preview_meaning)}</p></div>
+            <button class="btn btn-quiet" type="button" data-speak-word="${escapeHtml(pending.preview_word)}">발음 듣기</button>
+          </div>` : ""}
           <div class="student-focus-stats">
             <article class="student-focus-stat">
               <p class="meta">배정</p>
-              <strong>${escapeHtml(fmtDate(pending.publish_at))}</strong>
+              <strong>${escapeHtml(studentAssignmentDate(pending.publish_at))}</strong>
             </article>
             <article class="student-focus-stat">
               <p class="meta">마감</p>
-              <strong>${escapeHtml(fmtDate(pending.due_at))}</strong>
+              <strong>${escapeHtml(studentAssignmentDate(pending.due_at))}</strong>
             </article>
             <article class="student-focus-stat">
               <p class="meta">범위</p>
@@ -1374,15 +1401,13 @@
           </div>
           <div class="row student-focus-actions">
             ${
-              pending.test_session_id
+              pending.test_session_id && pending.status !== "SCHEDULED"
                 ? `<button class="btn btn-warm" data-action="${primaryAction}" data-session-id="${pending.test_session_id}">${studentPrimaryActionLabel(pending)}</button>`
                 : `<button class="btn btn-quiet" type="button" disabled>${studentPrimaryActionLabel(pending)}</button>`
             }
             ${
-              pending.test_session_id
-                ? `<button class="btn btn-quiet" data-action="open-session" data-session-id="${pending.test_session_id}">${
-                    pending.test_session_status === "IN_PROGRESS" ? "테스트 이어가기" : "바로 테스트"
-                  }</button>`
+              pending.test_session_id && pending.status !== "SCHEDULED" && !needsPreview && pending.test_session_status !== "IN_PROGRESS"
+                ? `<button class="btn btn-quiet" data-action="open-memorize" data-session-id="${pending.test_session_id}">단어 먼저 보기</button>`
                 : ""
             }
             ${
@@ -1401,8 +1426,7 @@
         </section>
       `;
 
-    const visibleTaskItems = remainingItems.slice(0, 2);
-    const hiddenTaskCount = Math.max(0, remainingItems.length - visibleTaskItems.length);
+    const visibleTaskItems = sortedItems;
     const secondaryCards = visibleTaskItems
       .map((item) => {
         const hasSession = Boolean(item.test_session_id);
@@ -1425,16 +1449,13 @@
               <p class="meta">마감 ${fmtDate(item.due_at)}</p>
             </div>
             <div class="student-task-actions">
-              ${hasSession ? `<button class="btn btn-quiet" data-action="open-session" data-session-id="${item.test_session_id}">${actionLabel}</button>` : `<button class="btn btn-quiet" type="button" disabled>시험 준비중</button>`}
+              ${item.test_session_status === "COMPLETED" ? "" : hasSession && item.status !== "SCHEDULED" ? `<button class="btn btn-quiet" data-action="open-session" data-session-id="${item.test_session_id}">${actionLabel}</button>` : `<button class="btn btn-quiet" type="button" disabled>${item.status === "SCHEDULED" ? "아직 예정" : "시험 준비중"}</button>`}
               ${item.test_session_status === "COMPLETED" ? `<span class="badge done">점수 ${item.score ?? 0}/100</span>` : ""}
             </div>
           </article>
         `;
       })
       .join("");
-    const archivedTaskHint = hiddenTaskCount
-      ? `<p class="meta student-task-more">나머지 ${hiddenTaskCount}개는 우선순위가 낮아 접어 두었습니다.</p>`
-      : "";
     const reviewPanel = `
       <section class="paper student-panel-card">
         <div class="paper-head">
@@ -1462,11 +1483,10 @@
     const tasksPanel = `
       <section class="paper student-panel-card">
         <div class="paper-head">
-          <h2>과제 선택</h2>
+          <h2>전체 과제</h2>
           <p>다른 과제로 이동할 때만 열어 보면 됩니다.</p>
         </div>
         <div class="student-task-list">${secondaryCards || `<div class="note-lines">현재 추가로 확인할 과제가 없습니다.</div>`}</div>
-        ${archivedTaskHint}
       </section>
     `;
 
@@ -1487,6 +1507,9 @@
     `;
 
     const tabButtons = Array.from(studentView.querySelectorAll("[data-student-screen]"));
+    studentView.querySelectorAll("[data-speak-word]").forEach((button) => {
+      button.addEventListener("click", () => speakWord(button.dataset.speakWord));
+    });
     tabButtons.forEach((btn, index) => {
       btn.addEventListener("click", () => activateStudentDashboardPanel(btn.dataset.studentScreen));
       btn.addEventListener("keydown", (event) => {
@@ -1769,6 +1792,7 @@
               ? `
                 <div class="preview-card">
                   <p class="preview-word">${escapeHtml(current.word)}</p>
+                  <button id="previewSpeakBtn" type="button" class="btn btn-quiet" aria-label="${escapeHtml(current.word)} 발음 듣기">발음 듣기</button>
                   <p class="preview-meaning">${escapeHtml(current.meaning || "-")}</p>
                   ${current.exampleSentence ? `<p class="preview-example">${escapeHtml(current.exampleSentence)}</p>` : ""}
                   ${current.hint ? `<p class="question-hint">힌트: ${escapeHtml(current.hint)}</p>` : ""}
@@ -1789,6 +1813,7 @@
     `;
 
     mountStudentPreviewTimer();
+    document.getElementById("previewSpeakBtn")?.addEventListener("click", () => speakWord(current.word));
 
     document.getElementById("previewDashboardBtn").addEventListener("click", () => navigateToStudentDashboard());
     document.getElementById("previewPrevBtn").addEventListener("click", () => {
@@ -2076,8 +2101,12 @@
                 : ""
             }
             <p class="meta">내 답안: ${escapeHtml(item.response || "미응답")}</p>
-            <p><strong>정답:</strong> ${escapeHtml(item.expectedAnswer)}</p>
-            <p class="meta">뜻: ${escapeHtml(item.meaningPrimary || "-")}</p>
+            ${item.isRecovered || !state.studentReview.id
+              ? `<p><strong>정답:</strong> ${escapeHtml(item.expectedAnswer)}</p><p class="meta">${item.isRecovered ? "확인 완료" : "읽기 전용 복습"}</p>`
+              : `<details><summary>정답 다시 보기</summary><p>${escapeHtml(item.expectedAnswer)}</p></details>
+                 <label for="review-answer-${escapeHtml(item.id)}">답을 다시 입력해 주세요</label>
+                 <input id="review-answer-${escapeHtml(item.id)}" data-review-answer="${escapeHtml(item.id)}" value="${escapeHtml(state.studentReview.answers?.[item.id] || "")}" autocomplete="off" />
+                 ${state.studentReview.checks?.some((check) => check.itemId === item.id && !check.correct) ? `<p class="meta" role="status">아직 맞지 않았어요. 정답을 확인하고 다시 입력해 주세요.</p>` : ""}`}
           </article>
         `
       )
@@ -2090,7 +2119,7 @@
             <div>
               <p class="exam-eyebrow">오답 노트</p>
               <h2>오답노트</h2>
-              <p class="meta">한 번에 3문제씩 묶어서 다시 봅니다.</p>
+              <p class="meta">정답을 확인한 뒤 다시 입력해 보세요. 맞힌 단어만 완료됩니다. (${state.studentReview.recoveredCount}/${state.studentReview.itemCount})</p>
             </div>
             <div class="row">
               <span class="badge">묶음 ${safeBatchIndex + 1}/${batches.length}</span>
@@ -2115,8 +2144,8 @@
             </div>
             <div class="row">
               ${
-                state.studentReview.id && state.studentReview.status !== "COMPLETED" && safeBatchIndex === batches.length - 1
-                  ? `<button id="reviewCompleteBtn" class="btn btn-warm" type="button">회복 완료하기</button>`
+                state.studentReview.id && state.studentReview.status !== "COMPLETED" && batch.some((item) => !item.isRecovered)
+                  ? `<button id="reviewCompleteBtn" class="btn btn-warm" type="button">답안 확인</button>`
                   : ""
               }
               <button id="reviewDashboardBtn" class="btn ${state.studentReview.id && state.studentReview.status !== "COMPLETED" && safeBatchIndex === batches.length - 1 ? "btn-quiet" : "btn-warm"}" type="button">대시보드로</button>
@@ -2143,24 +2172,32 @@
       renderStudentReviewScreen();
     });
 
+    studentView.querySelectorAll("[data-review-answer]").forEach((input) => {
+      input.addEventListener("input", () => { state.studentReview.answers[input.dataset.reviewAnswer] = input.value; });
+    });
     const completeBtn = document.getElementById("reviewCompleteBtn");
     if (completeBtn) {
       completeBtn.addEventListener("click", async () => {
+        completeBtn.disabled = true;
         try {
           const result = await api(`/students/review-sets/${state.studentReview.id}/complete`, {
             method: "POST",
-            body: {},
+            body: { answers: batch.filter((item) => !item.isRecovered).map((item) => ({ itemId: item.id, response: state.studentReview.answers[item.id] || "" })) },
           });
           state.studentReview = {
             ...buildStudentReviewState(result.reviewSet),
             batchIndex: safeBatchIndex,
             rewards: result.rewards,
             status: result.reviewSet.status,
+            answers: state.studentReview.answers,
+            checks: result.checks || [],
           };
-          toast(`오답 복습 완료${result.rewards?.earnedXp ? ` / XP +${result.rewards.earnedXp}` : ""}`);
+          toast(result.reviewSet.status === "COMPLETED" ? `오답 복습 완료${result.rewards?.earnedXp ? ` / XP +${result.rewards.earnedXp}` : ""}` : `확인 완료 ${result.reviewSet.recoveredCount}/${result.reviewSet.itemCount}개`);
           renderStudentReviewScreen();
         } catch (err) {
           toast(err.message);
+        } finally {
+          completeBtn.disabled = false;
         }
       });
     }

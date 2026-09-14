@@ -1,6 +1,7 @@
 import { StatusBar } from "expo-status-bar";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Linking from "expo-linking";
+import * as Speech from "expo-speech";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -102,12 +103,27 @@ export default function App() {
   const [result, setResult] = useState<SubmitResult | null>(null);
   const [reviewSet, setReviewSet] = useState<ReviewSet | null>(null);
   const [reviewBatchIndex, setReviewBatchIndex] = useState(0);
+  const [reviewAnswers, setReviewAnswers] = useState<Record<string, string>>({});
+  const [reviewChecks, setReviewChecks] = useState<{ itemId: string; correct: boolean }[]>([]);
+  const [revealedReviewAnswers, setRevealedReviewAnswers] = useState<Record<string, boolean>>({});
   const [parentReports, setParentReports] = useState<ParentReport[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const examRef = useRef<ExamState | null>(null);
   const autoSubmitRef = useRef(false);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+
+  useEffect(() => () => { void Speech.stop(); }, [studentScreen, preview?.index]);
+
+  async function speakWord(word: string) {
+    try {
+      await Speech.stop();
+      Speech.speak(word, { language: "en-US", rate: 0.85,
+        onError: () => Alert.alert("발음 듣기", "재생하지 못했습니다. 기기의 음성 설정을 확인해 주세요.") });
+    } catch {
+      Alert.alert("발음 듣기", "재생하지 못했습니다. 다시 시도해 주세요.");
+    }
+  }
 
   const token = auth?.accessToken || null;
   const sortedAssignments = useMemo(() => sortAssignments(dashboard?.items || []), [dashboard]);
@@ -409,6 +425,9 @@ export default function App() {
   }
 
   async function openReview(review: ReviewSet | null) {
+    setReviewAnswers({});
+    setReviewChecks([]);
+    setRevealedReviewAnswers({});
     if (!review?.id || !token) {
       const localItems = result?.wrongItems || [];
       if (localItems.length === 0) return;
@@ -440,10 +459,16 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      const completed = await completeReviewSet(apiBaseUrl, token, reviewSet.id);
+      const batch = reviewBatches(reviewSet.items)[reviewBatchIndex] || [];
+      const answers = batch.filter((item) => item.id && !item.isRecovered)
+        .map((item) => ({ itemId: item.id!, response: reviewAnswers[item.id!] || "" }));
+      const completed = await completeReviewSet(apiBaseUrl, token, reviewSet.id, answers);
       setReviewSet(completed.reviewSet);
+      setReviewChecks(completed.checks || []);
+      setRevealedReviewAnswers({});
       await loadDashboard();
-      Alert.alert("복습 완료", completed.rewards?.earnedXp ? `XP +${completed.rewards.earnedXp}` : "오답 복습을 마쳤습니다.");
+      Alert.alert(completed.reviewSet.status === "COMPLETED" ? "복습 완료" : "답안 확인",
+        completed.reviewSet.status === "COMPLETED" ? "모든 단어를 맞혔습니다." : `확인 완료 ${completed.reviewSet.recoveredCount}/${completed.reviewSet.itemCount}개. 남은 단어를 다시 입력해 주세요.`);
     } catch (err) {
       await handleApiFailure(err);
     } finally {
@@ -531,14 +556,26 @@ export default function App() {
     );
   }
 
-  function renderAssignmentCard(item: StudentAssignment, primary = false) {
-    const canOpen = Boolean(item.test_session_id) && item.status !== "SCHEDULED";
+  function renderAssignmentAction(item: StudentAssignment, primary = false) {
+    const isCompleted = item.test_session_status === "COMPLETED" || item.status === "COMPLETED";
+    const canOpen = Boolean(item.test_session_id) && item.status !== "SCHEDULED" && !isCompleted;
     const actionLabel =
       item.test_session_status === "IN_PROGRESS"
         ? "이어서 풀기"
         : boolish(item.preview_enabled) && !item.preview_completed_at
           ? "암기부터 시작"
           : "시험 시작";
+
+    return <ActionButton
+      label={canOpen ? actionLabel : isCompleted ? "완료한 과제" : item.status === "SCHEDULED" ? "아직 예정" : "시험 준비중"}
+      icon={canOpen ? "play" : "clock"}
+      variant={primary ? "warm" : "quiet"}
+      onPress={() => openAssignment(item)}
+      disabled={!canOpen || busy}
+    />;
+  }
+
+  function renderAssignmentCard(item: StudentAssignment, primary = false) {
 
     return (
       <Card key={item.id} tone={primary ? "mint" : "default"}>
@@ -554,18 +591,18 @@ export default function App() {
           <Stat label="문항" value={`${item.question_count}`} />
           <Stat label="마감" value={fmtDate(item.due_at)} wide />
         </View>
+        {primary && item.preview_word ? <View style={styles.reviewItem}>
+          <Text style={styles.meta}>오늘 만날 단어</Text>
+          <Text style={styles.word}>{item.preview_word}</Text>
+          <Text style={styles.meta}>{item.preview_meaning}</Text>
+          <ActionButton label="발음 듣기" icon="volume-2" variant="quiet" onPress={() => speakWord(item.preview_word!)} />
+        </View> : null}
         <View style={styles.inlineBadges}>
           {boolish(item.preview_enabled) ? <Badge label={`암기 ${Math.max(0, Number(item.preview_duration_sec || 0))}초`} /> : null}
           {boolish(item.gamification_enabled) ? <Badge label="XP" tone="done" /> : null}
           {item.score != null ? <Badge label={`${item.score}/100`} tone="warm" /> : null}
         </View>
-        <ActionButton
-          label={canOpen ? actionLabel : item.status === "SCHEDULED" ? "아직 예정" : "시험 준비중"}
-          icon={canOpen ? "play" : "clock"}
-          variant={primary ? "warm" : "quiet"}
-          onPress={() => openAssignment(item)}
-          disabled={!canOpen || busy}
-        />
+        {!primary ? renderAssignmentAction(item) : null}
       </Card>
     );
   }
@@ -576,17 +613,12 @@ export default function App() {
     const completed = (dashboard?.items || []).filter((item) => item.test_session_status === "COMPLETED").length;
     const active = (dashboard?.items || []).filter((item) => ["SCHEDULED", "PUBLISHED", "IN_PROGRESS"].includes(item.status)).length;
     const missed = (dashboard?.items || []).filter((item) => item.status === "MISSED").length;
-    const secondary = sortedAssignments.filter((item) => item.id !== pendingAssignment?.id);
+    const learning = dashboard?.learningSummary;
 
     return (
-      <ScrollView contentContainerStyle={styles.scroll} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.green} />}>
+      <View style={styles.flex}>
+      <ScrollView key={dashboardTab} contentContainerStyle={styles.scroll} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.green} />}>
         <Header title="Words Check" subtitle="학생 앱" onLogout={logout} />
-        <View style={styles.tabs}>
-          <TabButton label="학습" icon="book-open" active={dashboardTab === "study"} onPress={() => setDashboardTab("study")} />
-          <TabButton label="복습" icon="rotate-ccw" active={dashboardTab === "review"} onPress={() => setDashboardTab("review")} />
-          <TabButton label="성장" icon="trending-up" active={dashboardTab === "growth"} onPress={() => setDashboardTab("growth")} />
-          <TabButton label="과제" icon="list" active={dashboardTab === "tasks"} onPress={() => setDashboardTab("tasks")} />
-        </View>
         {dashboardTab === "study" && result ? <ResultBrief result={result} onOpen={() => setStudentScreen("result")} onReview={() => openReview(result.reviewSet)} /> : null}
         {dashboardTab === "study" ? (
           pendingAssignment ? (
@@ -613,6 +645,18 @@ export default function App() {
         ) : null}
         {dashboardTab === "growth" ? (
           <>
+            {learning ? <Card>
+              <SectionTitle title="단어 학습 현황" meta={learning.message} />
+              <View style={styles.statGrid}>
+                <Metric label="평균 숙련도" value={`${learning.avgMastery}%`} />
+                <Metric label="복습 예정" value={learning.dueNow} />
+                <Metric label="약점 단어" value={learning.weakCount} />
+              </View>
+              {learning.weakWords.map((word) => <View key={`${word.lemma}-${word.meaning}`} style={styles.reviewItem}>
+                <Text style={styles.cardTitle}>{word.lemma}</Text>
+                <Text style={styles.meta}>{word.meaning} · 숙련도 {word.masteryScore}%</Text>
+              </View>)}
+            </Card> : null}
             <View style={styles.statGrid}>
               <Metric label="진행 필요" value={active} />
               <Metric label="완료" value={completed} />
@@ -629,15 +673,25 @@ export default function App() {
           </>
         ) : null}
         {dashboardTab === "tasks" ? (
-          secondary.length > 0 ? (
-            secondary.map((item) => renderAssignmentCard(item))
+          sortedAssignments.length > 0 ? (
+            sortedAssignments.map((item) => renderAssignmentCard(item))
           ) : (
             <Card>
-              <Text style={styles.meta}>추가 과제가 없습니다.</Text>
+              <Text style={styles.meta}>과제가 없습니다.</Text>
             </Card>
           )
         ) : null}
       </ScrollView>
+      {dashboardTab === "study" && pendingAssignment ? <View style={styles.primaryActionDock}>
+        {renderAssignmentAction(pendingAssignment, true)}
+      </View> : null}
+      <View style={[styles.tabs, styles.bottomTabs]}>
+        <TabButton label="학습" icon="book-open" active={dashboardTab === "study"} onPress={() => setDashboardTab("study")} />
+        <TabButton label="복습" icon="rotate-ccw" active={dashboardTab === "review"} onPress={() => setDashboardTab("review")} />
+        <TabButton label="성장" icon="trending-up" active={dashboardTab === "growth"} onPress={() => setDashboardTab("growth")} />
+        <TabButton label="과제" icon="list" active={dashboardTab === "tasks"} onPress={() => setDashboardTab("tasks")} />
+      </View>
+      </View>
     );
   }
 
@@ -657,6 +711,7 @@ export default function App() {
           {card ? (
             <View style={styles.memoryCard}>
               <Text style={styles.word}>{card.word}</Text>
+              <ActionButton label="발음 듣기" icon="volume-2" variant="quiet" onPress={() => speakWord(card.word)} />
               <Text style={styles.meaning}>{card.meaning}</Text>
               {card.exampleSentence ? <Text style={styles.hint}>{card.exampleSentence}</Text> : null}
               {card.hint ? <Text style={styles.meta}>{card.hint}</Text> : null}
@@ -779,8 +834,16 @@ export default function App() {
           {items.map((item, index) => (
             <View key={`${item.expectedAnswer}-${index}`} style={styles.reviewItem}>
               <Text style={styles.questionSmall}>{item.prompt}</Text>
-              <Text style={styles.answer}>{item.expectedAnswer}</Text>
-              <Text style={styles.meta}>{item.meaningPrimary || "-"}</Text>
+              {item.isRecovered || !item.id || revealedReviewAnswers[item.id] ? <Text style={styles.answer}>{item.expectedAnswer}</Text> : null}
+              {item.isRecovered ? <Text style={styles.meta}>확인 완료</Text> : item.id && reviewSet.id ? <>
+                <ActionButton label={revealedReviewAnswers[item.id] ? "정답 가리기" : "정답 다시 보기"} icon="eye" variant="quiet"
+                  onPress={() => setRevealedReviewAnswers((current) => ({ ...current, [item.id!]: !current[item.id!] }))} />
+                <TextInput style={styles.input} accessibilityLabel="복습 답안" placeholder="답을 다시 입력해 주세요" placeholderTextColor={colors.muted}
+                  autoCapitalize="none" autoCorrect={false} value={reviewAnswers[item.id] || ""}
+                  onChangeText={(value) => setReviewAnswers((current) => ({ ...current, [item.id!]: value }))} />
+                {reviewChecks.some((check) => check.itemId === item.id && !check.correct) ? <Text style={styles.errorText}>아직 맞지 않았어요. 다시 입력해 주세요.</Text> : null}
+              </> : null}
+              {item.blankSentence ? <Text style={styles.meta}>{item.blankSentence}</Text> : null}
               {item.response ? <Text style={styles.meta}>내 답안: {item.response}</Text> : null}
             </View>
           ))}
@@ -788,7 +851,8 @@ export default function App() {
             <ActionButton label="이전" icon="chevron-left" variant="quiet" disabled={safeIndex === 0} onPress={() => setReviewBatchIndex(safeIndex - 1)} />
             <ActionButton label="다음" icon="chevron-right" variant="quiet" disabled={safeIndex >= batches.length - 1} onPress={() => setReviewBatchIndex(safeIndex + 1)} />
           </View>
-          {safeIndex >= batches.length - 1 && reviewSet.status !== "COMPLETED" ? <ActionButton label="복습 완료" icon="check-circle" variant="warm" onPress={finishReview} disabled={busy} /> : null}
+          <Text style={styles.meta}>확인 완료 {reviewSet.recoveredCount}/{reviewSet.itemCount}개</Text>
+          {reviewSet.id && items.some((item) => !item.isRecovered) && reviewSet.status !== "COMPLETED" ? <ActionButton label="답안 확인" icon="check-circle" variant="warm" onPress={finishReview} disabled={busy} /> : null}
           <ActionButton label="대시보드" icon="home" variant="ghost" onPress={() => setStudentScreen("dashboard")} />
         </Card>
       </ScrollView>

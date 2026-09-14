@@ -95,7 +95,7 @@ export function TabButton({
   onPress: () => void;
 }) {
   return (
-    <Pressable onPress={onPress} style={[styles.tab, active && styles.tabActive]}>
+    <Pressable accessibilityRole="tab" accessibilityState={{ selected: active }} onPress={onPress} style={[styles.tab, active && styles.tabActive]}>
       <Feather name={icon} size={18} color={active ? "#fff" : colors.green} />
       <Text style={[styles.tabText, active && styles.tabTextActive]}>{label}</Text>
     </Pressable>

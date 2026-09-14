@@ -1,6 +1,6 @@
 const db = require("../db");
 const { uid, nowIso } = require("../utils");
-const { getStudentLearningSummary } = require("./learningEngine");
+const { getStudentLearningSummary, isAnswerCorrect, recordVocabularyAnswer } = require("./learningEngine");
 
 const BADGE_LIBRARY = {
   FIRST_3_DAYS: {
@@ -331,7 +331,11 @@ function getLatestOpenReviewSet(studentId) {
   return getReviewSet(row.id, studentId);
 }
 
-function completeReviewSet(reviewSetId, studentId) {
+function completeReviewSet(reviewSetId, studentId, answers = []) {
+  return db.transaction(() => checkReviewAnswers(reviewSetId, studentId, answers))();
+}
+
+function checkReviewAnswers(reviewSetId, studentId, answers) {
   const current = getReviewSet(reviewSetId, studentId);
   if (!current) {
     throw new Error("오답 복습 세트를 찾을 수 없습니다.");
@@ -348,27 +352,40 @@ function completeReviewSet(reviewSetId, studentId) {
     };
   }
 
-  const tx = db.transaction(() => {
-    db.prepare(
-      `UPDATE review_sets
-       SET status = 'COMPLETED',
-           recovered_count = item_count,
-           completed_at = ?
-       WHERE id = ? AND student_id = ?`
-    ).run(nowIso(), reviewSetId, studentId);
+  if (!Array.isArray(answers) || answers.length === 0) {
+    throw new Error("복습 답안을 입력해 주세요.");
+  }
+  const answerMap = new Map();
+  for (const answer of answers) {
+    if (!answer || typeof answer.itemId !== "string" || typeof answer.response !== "string" ||
+        !current.items.some((item) => item.id === answer.itemId) || answerMap.has(answer.itemId)) {
+      throw new Error("유효하지 않은 복습 답안입니다.");
+    }
+    answerMap.set(answer.itemId, answer.response);
+  }
+  const checks = [];
+  for (const item of current.items) {
+    if (item.isRecovered || !answerMap.has(item.id)) continue;
+    const correct = isAnswerCorrect(answerMap.get(item.id), item.expectedAnswer);
+    checks.push({ itemId: item.id, correct });
+    if (!correct) continue;
+    db.prepare(`UPDATE review_set_items SET is_recovered = 1, recovered_at = ? WHERE id = ?`)
+      .run(nowIso(), item.id);
+    if (item.vocabItemId) recordVocabularyAnswer({ studentId, vocabItemId: item.vocabItemId, isCorrect: true });
+  }
+  const recovered = db.prepare(`SELECT COUNT(*) AS count FROM review_set_items WHERE review_set_id = ? AND is_recovered = 1`)
+    .get(reviewSetId).count;
+  db.prepare(`UPDATE review_sets SET recovered_count = ? WHERE id = ?`).run(recovered, reviewSetId);
+  if (recovered < current.items.length) {
+    return { reviewSet: getReviewSet(reviewSetId, studentId), checks, rewards: null };
+  }
 
-    db.prepare(
-      `UPDATE review_set_items
-       SET is_recovered = 1,
-           recovered_at = COALESCE(recovered_at, ?)
-       WHERE review_set_id = ?`
-    ).run(nowIso(), reviewSetId);
-  });
-
-  tx();
+  db.prepare(`UPDATE review_sets SET status = 'COMPLETED', completed_at = ? WHERE id = ? AND student_id = ?`)
+    .run(nowIso(), reviewSetId, studentId);
 
   const rewards = current.gamificationEnabled
     ? (() => {
+        recordDailyStudy(studentId);
         const earnedXp = 8;
         const profile = awardXp({
           studentId,
@@ -397,6 +414,7 @@ function completeReviewSet(reviewSetId, studentId) {
 
   return {
     reviewSet: getReviewSet(reviewSetId, studentId),
+    checks,
     rewards,
   };
 }
@@ -474,10 +492,14 @@ function buildStudentDashboard(studentId) {
               ts.started_at,
               ts.completed_at,
               ts.preview_started_at,
-              ts.preview_completed_at
+              ts.preview_completed_at,
+              preview_word.lemma AS preview_word,
+              preview_word.meaning_primary AS preview_meaning
        FROM homework_assignments ha
        JOIN vocab_sources vs ON vs.id = ha.source_id
        LEFT JOIN test_sessions ts ON ts.assignment_id = ha.id
+       LEFT JOIN test_questions preview_question ON preview_question.test_session_id = ts.id AND preview_question.order_no = 1
+       LEFT JOIN vocab_items preview_word ON preview_word.id = preview_question.vocab_item_id
        WHERE ha.student_id = ?
          AND ha.status != 'CANCELED'
        ORDER BY
@@ -489,8 +511,7 @@ function buildStudentDashboard(studentId) {
            ELSE 4
          END,
          ha.due_at ASC,
-         ha.created_at DESC
-       LIMIT 16`
+         ha.created_at DESC`
     )
     .all(studentId);
 

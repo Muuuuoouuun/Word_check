@@ -2,3 +2,7 @@ node_modules/
 data/
 .env
 .codex-*
+
+# Local UI audit screenshots
+.audit-*.png
+.playwright-*.png

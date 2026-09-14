@@ -131,10 +131,10 @@ export function fetchReviewSet(baseUrl: string, token: string, reviewSetId: stri
   return apiRequest<{ reviewSet: ReviewSet }>(baseUrl, token, `/students/review-sets/${reviewSetId}`);
 }
 
-export function completeReviewSet(baseUrl: string, token: string, reviewSetId: string) {
+export function completeReviewSet(baseUrl: string, token: string, reviewSetId: string, answers: { itemId: string; response: string }[]) {
   return apiRequest<CompleteReviewResponse>(baseUrl, token, `/students/review-sets/${reviewSetId}/complete`, {
     method: "POST",
-    body: {},
+    body: { answers },
   });
 }
 
