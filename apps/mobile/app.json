@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "Words Check",
+    "slug": "words-check-mobile",
+    "scheme": "wordscheck",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#f6f5ee"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.wordscheck.mobile"
+    },
+    "android": {
+      "package": "com.wordscheck.mobile",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#f6f5ee"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "QR 로그인 링크를 스캔하기 위해 카메라 접근이 필요합니다."
+        }
+      ],
+      "expo-notifications"
+    ]
+  }
+}

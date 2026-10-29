@@ -1,6 +1,8 @@
 ﻿const ExcelJS = require("exceljs");
 const db = require("../db");
 const { uid, nowIso, hashSeed, mulberry32 } = require("../utils");
+const { selectAdaptiveWords } = require("./learningEngine");
+const { getResolvedSettings } = require("./settings");
 
 function makeBlank(sentence, lemma) {
   if (!sentence) return null;
@@ -18,6 +20,12 @@ function sampleWithoutReplacement(items, count, rng) {
     copy.splice(idx, 1);
   }
   return out;
+}
+
+function coerceNumber(value, fallback) {
+  if (value == null || value === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function buildQuestion(word, orderNo, rng) {
@@ -104,10 +112,19 @@ function generateTestForAssignment(assignmentId) {
     throw new Error(`Not enough words in range. need=${assignment.question_count}, got=${words.length}`);
   }
 
+  const settings = getResolvedSettings({ ownerTeacherId: assignment.teacher_id });
   const dateText = String(assignment.publish_at || "").slice(0, 10);
   const seedText = `${assignment.student_id}:${assignment.id}:${dateText}`;
-  const rng = mulberry32(hashSeed(seedText));
-  const selected = sampleWithoutReplacement(words, assignment.question_count, rng);
+  const adaptiveSelection = selectAdaptiveWords({
+    studentId: assignment.student_id,
+    sourceId: assignment.source_id,
+    rangeStartLesson: assignment.range_start_lesson,
+    rangeEndLesson: assignment.range_end_lesson,
+    questionCount: assignment.question_count,
+    seedText,
+    enabled: settings.adaptive_learning_enabled !== false,
+  });
+  const selected = adaptiveSelection.words;
 
   return createSessionWithWords(assignment, selected, seedText);
 }
@@ -179,8 +196,14 @@ function createSupplementalAssignmentFromSession(testSessionId, options = {}) {
     )
     .all(...vocabIds);
 
-  const questionCount = Math.max(1, Math.min(Number(options.questionCount || words.length), words.length));
-  const dueHours = Math.max(1, Number(options.dueHours || 24));
+  const settings = getResolvedSettings({ ownerTeacherId: session.teacher_id });
+  const requestedQuestionCount = Math.floor(coerceNumber(options.questionCount, words.length));
+  const questionCount = Math.max(1, Math.min(requestedQuestionCount, words.length));
+  const dueHours = Math.max(1, coerceNumber(options.dueHours ?? settings.supplement_due_hours, 24));
+  const previewEnabled = options.previewEnabled ?? settings.default_preview_enabled;
+  const previewDurationSec = Math.max(0, Number(options.previewDurationSec ?? settings.default_preview_duration_sec ?? 60));
+  const previewScope = String(options.previewScope || settings.default_preview_scope || "ALL").toUpperCase();
+  const gamificationEnabled = options.gamificationEnabled ?? settings.default_gamification_enabled;
 
   const seedText = `${session.student_id}:${testSessionId}:supplement:${nowIso().slice(0, 10)}`;
   const selected = sampleWithoutReplacement(words, questionCount, mulberry32(hashSeed(seedText)));
@@ -197,14 +220,20 @@ function createSupplementalAssignmentFromSession(testSessionId, options = {}) {
     range_start_lesson: rangeStart,
     range_end_lesson: rangeEnd,
     question_count: questionCount,
+    assignment_kind: "SUPPLEMENT",
+    preview_enabled: previewEnabled ? 1 : 0,
+    preview_duration_sec: previewDurationSec,
+    preview_scope: ["ALL", "KEYWORDS", "WRONG_ONLY"].includes(previewScope) ? previewScope : "ALL",
+    gamification_enabled: gamificationEnabled ? 1 : 0,
     publish_at: nowIso(),
     due_at: new Date(Date.now() + dueHours * 60 * 60 * 1000).toISOString(),
   };
 
   db.prepare(
     `INSERT INTO homework_assignments
-     (id, student_id, teacher_id, source_id, range_start_lesson, range_end_lesson, question_count, publish_at, due_at, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED', ?, ?)`
+     (id, student_id, teacher_id, source_id, range_start_lesson, range_end_lesson, question_count, assignment_kind,
+      preview_enabled, preview_duration_sec, preview_scope, gamification_enabled, publish_at, due_at, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED', ?, ?)`
   ).run(
     assignment.id,
     assignment.student_id,
@@ -213,6 +242,11 @@ function createSupplementalAssignmentFromSession(testSessionId, options = {}) {
     assignment.range_start_lesson,
     assignment.range_end_lesson,
     assignment.question_count,
+    assignment.assignment_kind,
+    assignment.preview_enabled,
+    assignment.preview_duration_sec,
+    assignment.preview_scope,
+    assignment.gamification_enabled,
     assignment.publish_at,
     assignment.due_at,
     nowIso(),

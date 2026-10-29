@@ -18,6 +18,16 @@ const {
 } = require("./services/testGenerator");
 const { runAutomationCycle, queueTier3ForCompletion } = require("./services/notifications");
 const { getResolvedSettings, upsertTeacherSettings, getSettingDefinitions } = require("./services/settings");
+const { getTeacherLearningOverview, isAnswerCorrect, recordVocabularyAnswer } = require("./services/learningEngine");
+const { startStudentSession } = require("./services/studentSessions");
+const {
+  applyExamCompletionRewards,
+  buildStudentDashboard,
+  completeReviewSet,
+  createReviewSetFromWrongItems,
+  getGameProfileSummary,
+  getReviewSet,
+} = require("./services/studentProgress");
 const { importFromCsv, importFromJson } = require("./services/vocabImport");
 
 initDb();
@@ -87,6 +97,87 @@ function coerceNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function coerceBoolean(value, fallback = false) {
+  if (value == null) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function normalizePreviewScope(value, fallback = "ALL") {
+  const normalized = String(value || fallback).trim().toUpperCase();
+  return ["ALL", "KEYWORDS", "WRONG_ONLY"].includes(normalized) ? normalized : fallback;
+}
+
+function getStudentSessionContext(sessionId) {
+  return db
+    .prepare(
+      `SELECT ts.*, ha.id AS assignment_id, ha.student_id AS assignment_student_id, ha.teacher_id, ha.source_id,
+              ha.preview_enabled, ha.preview_duration_sec, ha.preview_scope, ha.gamification_enabled, ha.assignment_kind,
+              vs.name AS source_name
+       FROM test_sessions ts
+       JOIN homework_assignments ha ON ha.id = ts.assignment_id
+       JOIN vocab_sources vs ON vs.id = ha.source_id
+       WHERE ts.id = ?`
+    )
+    .get(sessionId);
+}
+
+function buildPreviewCardsForSession(session) {
+  const rows = db
+    .prepare(
+      `SELECT tq.id, tq.order_no, tq.vocab_item_id, tq.prompt, tq.blank_sentence, vi.lemma, vi.meaning_primary, vi.example_sentence
+       FROM test_questions tq
+       JOIN vocab_items vi ON vi.id = tq.vocab_item_id
+       WHERE tq.test_session_id = ?
+       ORDER BY tq.order_no ASC`
+    )
+    .all(session.id);
+
+  let selected = rows;
+  const scope = normalizePreviewScope(session.preview_scope, "ALL");
+
+  if (scope === "KEYWORDS") {
+    selected = rows.slice(0, 5);
+  } else if (scope === "WRONG_ONLY") {
+    const wrongRows = db
+      .prepare(
+        `SELECT tq.vocab_item_id, COUNT(*) AS wrong_count
+         FROM student_answers sa
+         JOIN test_questions tq ON tq.id = sa.question_id
+         JOIN test_sessions past_ts ON past_ts.id = sa.test_session_id
+         JOIN homework_assignments past_ha ON past_ha.id = past_ts.assignment_id
+         WHERE past_ts.student_id = ?
+           AND sa.is_correct = 0
+           AND past_ha.source_id = ?
+         GROUP BY tq.vocab_item_id
+         ORDER BY wrong_count DESC, MAX(sa.answered_at) DESC
+         LIMIT 5`
+      )
+      .all(session.student_id, session.source_id);
+
+    if (wrongRows.length > 0) {
+      const allowed = new Set(wrongRows.map((row) => row.vocab_item_id));
+      selected = rows.filter((row) => allowed.has(row.vocab_item_id)).slice(0, 5);
+    } else {
+      selected = rows.slice(0, 5);
+    }
+  }
+
+  return selected.map((row) => ({
+    questionId: row.id,
+    orderNo: row.order_no,
+    vocabItemId: row.vocab_item_id,
+    word: row.lemma,
+    meaning: row.meaning_primary,
+    exampleSentence: row.example_sentence,
+    hint: row.blank_sentence || row.prompt,
+  }));
+}
+
 function finalizeSessionSubmission({ sessionId, answers, actor, note = null }) {
   if (!Array.isArray(answers)) {
     throw new Error("answers 배열이 필요합니다.");
@@ -94,7 +185,7 @@ function finalizeSessionSubmission({ sessionId, answers, actor, note = null }) {
 
   const session = db
     .prepare(
-      `SELECT ts.*, ha.id AS assignment_id, ha.teacher_id
+      `SELECT ts.*, ha.id AS assignment_id, ha.teacher_id, ha.assignment_kind, ha.gamification_enabled
        FROM test_sessions ts
        JOIN homework_assignments ha ON ha.id = ts.assignment_id
        WHERE ts.id = ?`
@@ -111,14 +202,20 @@ function finalizeSessionSubmission({ sessionId, answers, actor, note = null }) {
   const questionMap = new Map(
     db
       .prepare(
-        `SELECT tq.id, tq.expected_answer, tq.prompt, tq.type, tq.blank_sentence, vi.meaning_primary
+        `SELECT tq.id, tq.vocab_item_id, tq.order_no, tq.expected_answer, tq.prompt, tq.type, tq.blank_sentence, vi.meaning_primary
          FROM test_questions tq
          JOIN vocab_items vi ON vi.id = tq.vocab_item_id
-         WHERE tq.test_session_id = ?`
+         WHERE tq.test_session_id = ?
+         ORDER BY tq.order_no ASC`
       )
       .all(sessionId)
       .map((q) => [q.id, q])
   );
+  const answersByQuestionId = new Map();
+  for (const ans of answers) {
+    if (!ans?.questionId || !questionMap.has(ans.questionId)) continue;
+    answersByQuestionId.set(ans.questionId, ans.response);
+  }
 
   let correct = 0;
   const total = questionMap.size;
@@ -132,25 +229,30 @@ function finalizeSessionSubmission({ sessionId, answers, actor, note = null }) {
        DO UPDATE SET response = excluded.response, is_correct = excluded.is_correct, answered_at = excluded.answered_at`
     );
 
-    for (const ans of answers) {
-      const q = questionMap.get(ans.questionId);
-      if (!q) continue;
-      const normalizedUser = String(ans.response || "").trim().toLowerCase();
-      const normalizedExpected = String(q.expected_answer || "").trim().toLowerCase();
-      const isCorrect = normalizedUser === normalizedExpected;
+    for (const q of questionMap.values()) {
+      const response = answersByQuestionId.has(q.id) ? answersByQuestionId.get(q.id) : "";
+      const isCorrect = isAnswerCorrect(response, q.expected_answer);
+      const answeredAt = nowIso();
       if (isCorrect) correct += 1;
       if (!isCorrect) {
         wrongItems.push({
           questionId: q.id,
+          vocabItemId: q.vocab_item_id,
           type: q.type,
           prompt: q.prompt,
           blankSentence: q.blank_sentence,
           meaningPrimary: q.meaning_primary,
           expectedAnswer: q.expected_answer,
-          response: String(ans.response || ""),
+          response: String(response || ""),
         });
       }
-      upsert.run(uid(), sessionId, q.id, String(ans.response || ""), isCorrect ? 1 : 0, nowIso());
+      upsert.run(uid(), sessionId, q.id, String(response || ""), isCorrect ? 1 : 0, answeredAt);
+      recordVocabularyAnswer({
+        studentId: session.student_id,
+        vocabItemId: q.vocab_item_id,
+        isCorrect,
+        answeredAt,
+      });
     }
 
     const score = total > 0 ? Math.round((correct / total) * 100) : 0;
@@ -185,7 +287,7 @@ function finalizeSessionSubmission({ sessionId, answers, actor, note = null }) {
         actor.mode,
         note || null,
         JSON.stringify({
-          answerCount: answers.length,
+          answerCount: answersByQuestionId.size,
           totalQuestionCount: total,
         }),
         nowIso()
@@ -195,7 +297,11 @@ function finalizeSessionSubmission({ sessionId, answers, actor, note = null }) {
 
   tx();
 
-  queueTier3ForCompletion(session.assignment_id);
+  try {
+    queueTier3ForCompletion(session.assignment_id);
+  } catch (notifyErr) {
+    console.error("completion notification queue error", session.assignment_id, notifyErr.message);
+  }
 
   const finalSession = db.prepare(`SELECT score, out_of FROM test_sessions WHERE id = ?`).get(sessionId);
   const wrongCount = Math.max(0, total - correct);
@@ -206,6 +312,39 @@ function finalizeSessionSubmission({ sessionId, answers, actor, note = null }) {
   const elapsedSeconds = session.started_at
     ? Math.max(0, Math.round((Date.now() - new Date(session.started_at).getTime()) / 1000))
     : null;
+  let reviewSet = null;
+  try {
+    reviewSet = createReviewSetFromWrongItems({
+      studentId: session.student_id,
+      assignmentId: session.assignment_id,
+      sourceSessionId: sessionId,
+      wrongItems,
+    });
+  } catch (reviewErr) {
+    console.error("review set generation error", sessionId, reviewErr.message);
+  }
+
+  let rewards = {
+    profile: null,
+    earnedXp: 0,
+    newlyGrantedBadges: [],
+  };
+  try {
+    rewards = applyExamCompletionRewards({
+      studentId: session.student_id,
+      sessionId,
+      assignmentKind: session.assignment_kind || "REGULAR",
+      gamificationEnabled: coerceBoolean(session.gamification_enabled, true),
+      completedAt: nowIso(),
+    });
+  } catch (rewardErr) {
+    console.error("reward application error", sessionId, rewardErr.message);
+    try {
+      rewards.profile = getGameProfileSummary(session.student_id);
+    } catch (profileErr) {
+      console.error("game profile summary error", session.student_id, profileErr.message);
+    }
+  }
 
   let supplemental = null;
   if (wrongCount >= minWrongForSupplement) {
@@ -225,12 +364,17 @@ function finalizeSessionSubmission({ sessionId, answers, actor, note = null }) {
     correctCount: correct,
     wrongCount,
     wrongItems,
+    reviewSet,
     elapsedSeconds,
     supplementalAvailable: wrongCount > 0,
     supplementalCreated: Boolean(supplemental),
     supplementalAssignmentId: supplemental?.assignmentId || null,
     supplementalSessionId: supplemental?.sessionId || null,
     supplementalDueAt: supplemental?.dueAt || null,
+    gamificationEnabled: coerceBoolean(session.gamification_enabled, true),
+    gameProfile: rewards.profile,
+    earnedXp: rewards.earnedXp,
+    newBadges: rewards.newlyGrantedBadges,
   };
 }
 
@@ -325,22 +469,11 @@ app.post("/auth/access-links", authRequired(PRIVILEGED_ROLES), async (req, res) 
 });
 
 app.get("/students/me/dashboard", authRequired(["STUDENT"]), (req, res) => {
-  const rows = db
-    .prepare(
-      `SELECT ha.*, ts.id AS test_session_id, ts.status AS test_session_status, ts.score
-       FROM homework_assignments ha
-       LEFT JOIN test_sessions ts ON ts.assignment_id = ha.id
-       WHERE ha.student_id = ?
-         AND ha.status IN ('SCHEDULED','PUBLISHED','IN_PROGRESS','MISSED')
-       ORDER BY ha.due_at ASC`
-    )
-    .all(req.user.studentId);
-
-  res.json({ items: rows });
+  return res.json(buildStudentDashboard(req.user.studentId));
 });
 
 app.get("/students/test-sessions/:id/questions", authRequired(["STUDENT"]), (req, res) => {
-  const session = db.prepare(`SELECT * FROM test_sessions WHERE id = ?`).get(req.params.id);
+  const session = getStudentSessionContext(req.params.id);
   if (!session) return res.status(404).json({ message: "세션을 찾을 수 없습니다." });
   if (session.student_id !== req.user.studentId) return res.status(403).json({ message: "권한이 없습니다." });
 
@@ -361,13 +494,110 @@ app.get("/students/test-sessions/:id/questions", authRequired(["STUDENT"]), (req
       completedAt: session.completed_at,
       score: session.score,
       outOf: session.out_of,
+      sourceName: session.source_name,
+      assignmentKind: session.assignment_kind,
+      previewEnabled: Boolean(session.preview_enabled),
+      previewDurationSec: Number(session.preview_duration_sec || 0),
+      previewScope: normalizePreviewScope(session.preview_scope, "ALL"),
+      previewStartedAt: session.preview_started_at,
+      previewCompletedAt: session.preview_completed_at,
+      gamificationEnabled: Boolean(session.gamification_enabled),
     },
     questions,
   });
 });
 
+app.get("/students/test-sessions/:id/preview", authRequired(["STUDENT"]), (req, res) => {
+  const session = getStudentSessionContext(req.params.id);
+  if (!session) return res.status(404).json({ message: "세션을 찾을 수 없습니다." });
+  if (session.student_id !== req.user.studentId) return res.status(403).json({ message: "권한이 없습니다." });
+
+  return res.json({
+    sessionId: session.id,
+    previewEnabled: Boolean(session.preview_enabled),
+    previewDurationSec: Number(session.preview_duration_sec || 0),
+    previewScope: normalizePreviewScope(session.preview_scope, "ALL"),
+    previewStartedAt: session.preview_started_at,
+    previewCompletedAt: session.preview_completed_at,
+    sourceName: session.source_name,
+    cards: buildPreviewCardsForSession(session),
+  });
+});
+
+app.post("/students/test-sessions/:id/preview/start", authRequired(["STUDENT"]), (req, res) => {
+  const session = getStudentSessionContext(req.params.id);
+  if (!session) return res.status(404).json({ message: "세션을 찾을 수 없습니다." });
+  if (session.student_id !== req.user.studentId) return res.status(403).json({ message: "권한이 없습니다." });
+  if (!session.preview_enabled) return res.json({ ok: true, previewStartedAt: null, previewCompletedAt: session.preview_completed_at });
+
+  const previewStartedAt = session.preview_started_at || nowIso();
+  db.prepare(
+    `UPDATE test_sessions
+     SET preview_started_at = COALESCE(preview_started_at, ?),
+         updated_at = ?
+     WHERE id = ?`
+  ).run(previewStartedAt, nowIso(), req.params.id);
+
+  return res.json({
+    ok: true,
+    previewStartedAt,
+    previewCompletedAt: session.preview_completed_at,
+  });
+});
+
+app.post("/students/test-sessions/:id/preview/complete", authRequired(["STUDENT"]), (req, res) => {
+  const session = getStudentSessionContext(req.params.id);
+  if (!session) return res.status(404).json({ message: "세션을 찾을 수 없습니다." });
+  if (session.student_id !== req.user.studentId) return res.status(403).json({ message: "권한이 없습니다." });
+  if (!session.preview_enabled) return res.json({ ok: true, previewCompletedAt: null });
+
+  const previewStartedAt = session.preview_started_at || nowIso();
+  const previewCompletedAt = session.preview_completed_at || nowIso();
+  db.prepare(
+    `UPDATE test_sessions
+     SET preview_started_at = COALESCE(preview_started_at, ?),
+         preview_completed_at = COALESCE(preview_completed_at, ?),
+         updated_at = ?
+     WHERE id = ?`
+  ).run(previewStartedAt, previewCompletedAt, nowIso(), req.params.id);
+
+  return res.json({
+    ok: true,
+    previewStartedAt,
+    previewCompletedAt,
+  });
+});
+
+app.get("/students/review-sets/:id", authRequired(["STUDENT"]), (req, res) => {
+  const reviewSet = getReviewSet(req.params.id, req.user.studentId);
+  if (!reviewSet) return res.status(404).json({ message: "오답 복습 세트를 찾을 수 없습니다." });
+  return res.json({ reviewSet });
+});
+
+app.post("/students/review-sets/:id/complete", authRequired(["STUDENT"]), (req, res) => {
+  try {
+    const result = completeReviewSet(req.params.id, req.user.studentId, req.body.answers);
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    return res.status(400).json({ message: err.message });
+  }
+});
+
 app.post("/teacher/assignments", authRequired(PRIVILEGED_ROLES), (req, res) => {
-  const { studentId, sourceId, rangeStartLesson, rangeEndLesson, questionCount, publishAt, dueAt, teacherId } = req.body;
+  const {
+    studentId,
+    sourceId,
+    rangeStartLesson,
+    rangeEndLesson,
+    questionCount,
+    publishAt,
+    dueAt,
+    teacherId,
+    previewEnabled,
+    previewDurationSec,
+    previewScope,
+    gamificationEnabled,
+  } = req.body;
   if (!studentId || !sourceId || !rangeStartLesson || !rangeEndLesson || !questionCount || !publishAt) {
     return res.status(400).json({ message: "필수 값이 누락되었습니다." });
   }
@@ -393,13 +623,24 @@ app.post("/teacher/assignments", authRequired(PRIVILEGED_ROLES), (req, res) => {
   const settings = getResolvedSettings({ ownerTeacherId });
   const publishIso = new Date(publishAt).toISOString();
   const defaultDueHours = Math.max(1, coerceNumber(settings.default_assignment_due_hours, 2));
+  const resolvedPreviewEnabled = coerceBoolean(previewEnabled, coerceBoolean(settings.default_preview_enabled, false));
+  const resolvedPreviewDurationSec = Math.max(
+    0,
+    coerceNumber(previewDurationSec, coerceNumber(settings.default_preview_duration_sec, 60))
+  );
+  const resolvedPreviewScope = normalizePreviewScope(previewScope, normalizePreviewScope(settings.default_preview_scope, "ALL"));
+  const resolvedGamificationEnabled = coerceBoolean(
+    gamificationEnabled,
+    coerceBoolean(settings.default_gamification_enabled, true)
+  );
   const dueIso = dueAt
     ? new Date(dueAt).toISOString()
     : new Date(new Date(publishIso).getTime() + defaultDueHours * 60 * 60 * 1000).toISOString();
   db.prepare(
     `INSERT INTO homework_assignments
-     (id, student_id, teacher_id, source_id, range_start_lesson, range_end_lesson, question_count, publish_at, due_at, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?, ?)`
+     (id, student_id, teacher_id, source_id, range_start_lesson, range_end_lesson, question_count, assignment_kind,
+      preview_enabled, preview_duration_sec, preview_scope, gamification_enabled, publish_at, due_at, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'REGULAR', ?, ?, ?, ?, ?, ?, 'SCHEDULED', ?, ?)`
   ).run(
     id,
     studentId,
@@ -408,6 +649,10 @@ app.post("/teacher/assignments", authRequired(PRIVILEGED_ROLES), (req, res) => {
     Number(rangeStartLesson),
     Number(rangeEndLesson),
     Number(questionCount),
+    resolvedPreviewEnabled ? 1 : 0,
+    resolvedPreviewDurationSec,
+    resolvedPreviewScope,
+    resolvedGamificationEnabled ? 1 : 0,
     publishIso,
     dueIso,
     nowIso(),
@@ -517,7 +762,11 @@ app.get("/teacher/assignments", authRequired(PRIVILEGED_ROLES), (req, res) => {
     )
     .all(...params);
 
-  res.json({ items: rows });
+  const learningOverview = getTeacherLearningOverview({
+    teacherId: !isAdmin(req.user) ? req.user.teacherId : teacherId || null,
+  });
+
+  res.json({ items: rows, learningOverview });
 });
 
 app.post("/teacher/assignments/:id/generate", authRequired(PRIVILEGED_ROLES), (req, res) => {
@@ -685,19 +934,11 @@ app.post("/teacher/test-sessions/:id/offline-submit", authRequired(PRIVILEGED_RO
 });
 
 app.post("/students/test-sessions/:id/start", authRequired(["STUDENT"]), (req, res) => {
-  const session = db.prepare(`SELECT * FROM test_sessions WHERE id = ?`).get(req.params.id);
-  if (!session) return res.status(404).json({ message: "세션을 찾을 수 없습니다." });
-  if (session.student_id !== req.user.studentId) return res.status(403).json({ message: "권한이 없습니다." });
-
-  db.prepare(
-    `UPDATE test_sessions
-     SET status = 'IN_PROGRESS', started_at = COALESCE(started_at, ?), updated_at = ?
-     WHERE id = ?`
-  ).run(nowIso(), nowIso(), req.params.id);
-
-  db.prepare(`UPDATE homework_assignments SET status = 'IN_PROGRESS', updated_at = ? WHERE id = ?`).run(nowIso(), session.assignment_id);
-
-  res.json({ ok: true });
+  try {
+    return res.json(startStudentSession(req.params.id, req.user.studentId));
+  } catch (error) {
+    return res.status(error.status || 500).json({ message: error.status ? error.message : "시험을 시작하지 못했습니다." });
+  }
 });
 
 app.post("/students/test-sessions/:id/submit", authRequired(["STUDENT"]), (req, res) => {
@@ -706,7 +947,7 @@ app.post("/students/test-sessions/:id/submit", authRequired(["STUDENT"]), (req, 
     return res.status(400).json({ message: "answers 배열이 필요합니다." });
   }
 
-  const session = db.prepare(`SELECT * FROM test_sessions WHERE id = ?`).get(req.params.id);
+  const session = getStudentSessionContext(req.params.id);
   if (!session) return res.status(404).json({ message: "세션을 찾을 수 없습니다." });
   if (session.student_id !== req.user.studentId) return res.status(403).json({ message: "권한이 없습니다." });
 

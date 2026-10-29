@@ -2,8 +2,16 @@
 <html lang="ko">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Words Check - Analog Homework Board</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>단어 학습 노트</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Gaegu:wght@400;700&family=Gowun+Batang:wght@400;700&family=Noto+Sans+KR:wght@400;500;700;800;900&display=swap"
+      />
+    </noscript>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -11,8 +19,8 @@
     <main class="page">
       <header class="topbar reveal">
         <div>
-          <p class="stamp">Homework Delivery Automation</p>
-          <h1>Words Check Notebook</h1>
+          <p class="stamp">단어 숙제 자동화</p>
+          <h1>단어 학습 노트</h1>
         </div>
         <div class="topbar-actions">
           <p id="whoami" class="whoami">로그인 필요</p>
@@ -51,6 +59,22 @@
         <section id="studentView" class="hidden reveal"></section>
         <section id="teacherView" class="hidden reveal"></section>
         <section id="parentView" class="hidden reveal"></section>
+      </section>
+
+      <section id="loadingOverlay" class="loading-overlay hidden" aria-hidden="true" aria-live="polite">
+        <div class="loading-card">
+          <p class="loading-stamp">학습 화면 준비 중</p>
+          <p id="loadingLabel" class="loading-label">단어장을 준비하는 중</p>
+          <div class="loading-word-stack">
+            <strong id="loadingWord" class="loading-word">apple</strong>
+            <p id="loadingMeaning" class="loading-meaning">사과</p>
+          </div>
+          <div class="loading-dots" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
       </section>
 
       <section id="toast" class="toast hidden"></section>
