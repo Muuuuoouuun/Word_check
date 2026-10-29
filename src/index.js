@@ -19,7 +19,7 @@ const {
 const { runAutomationCycle, queueTier3ForCompletion } = require("./services/notifications");
 const { getResolvedSettings, upsertTeacherSettings, getSettingDefinitions } = require("./services/settings");
 const { getTeacherLearningOverview, isAnswerCorrect, recordVocabularyAnswer } = require("./services/learningEngine");
-const { startStudentSession } = require("./services/studentSessions");
+const { assertStudentSessionAllowed, startStudentSession } = require("./services/studentSessions");
 const {
   applyExamCompletionRewards,
   buildStudentDashboard,
@@ -115,7 +115,7 @@ function normalizePreviewScope(value, fallback = "ALL") {
 function getStudentSessionContext(sessionId) {
   return db
     .prepare(
-      `SELECT ts.*, ha.id AS assignment_id, ha.student_id AS assignment_student_id, ha.teacher_id, ha.source_id,
+      `SELECT ts.*, ha.id AS assignment_id, ha.student_id AS assignment_student_id, ha.status AS assignment_status, ha.teacher_id, ha.source_id,
               ha.preview_enabled, ha.preview_duration_sec, ha.preview_scope, ha.gamification_enabled, ha.assignment_kind,
               vs.name AS source_name
        FROM test_sessions ts
@@ -947,11 +947,8 @@ app.post("/students/test-sessions/:id/submit", authRequired(["STUDENT"]), (req, 
     return res.status(400).json({ message: "answers 배열이 필요합니다." });
   }
 
-  const session = getStudentSessionContext(req.params.id);
-  if (!session) return res.status(404).json({ message: "세션을 찾을 수 없습니다." });
-  if (session.student_id !== req.user.studentId) return res.status(403).json({ message: "권한이 없습니다." });
-
   try {
+    assertStudentSessionAllowed(getStudentSessionContext(req.params.id), req.user.studentId);
     const result = finalizeSessionSubmission({
       sessionId: req.params.id,
       answers,
@@ -964,7 +961,7 @@ app.post("/students/test-sessions/:id/submit", authRequired(["STUDENT"]), (req, 
 
     return res.json({ ok: true, ...result });
   } catch (err) {
-    return res.status(400).json({ message: err.message });
+    return res.status(err.status || 400).json({ message: err.message });
   }
 });
 
@@ -1035,13 +1032,17 @@ app.get("/*path", (_req, res) => {
   res.sendFile(path.resolve(process.cwd(), "public", "index.html"));
 });
 
-cron.schedule("* * * * *", () => {
+if (require.main === module) {
+  cron.schedule("* * * * *", () => {
+    runAutomationCycle();
+  });
+
   runAutomationCycle();
-});
 
-runAutomationCycle();
+  const port = Number(process.env.PORT || 4002);
+  app.listen(port, () => {
+    console.log(`Server listening on http://localhost:${port}`);
+  });
+}
 
-const port = Number(process.env.PORT || 4002);
-app.listen(port, () => {
-  console.log(`Server listening on http://localhost:${port}`);
-});
+module.exports = app;

@@ -354,7 +354,7 @@ CREATE INDEX IF NOT EXISTS idx_assignment_status_due ON homework_assignments(sta
 CREATE INDEX IF NOT EXISTS idx_assignment_status_publish ON homework_assignments(status, publish_at);
 CREATE INDEX IF NOT EXISTS idx_assignment_student_publish ON homework_assignments(student_id, publish_at);
 CREATE INDEX IF NOT EXISTS idx_assignment_student_status_due ON homework_assignments(student_id, status, due_at);
-CREATE INDEX IF NOT EXISTS idx_assignment_teacher_kind ON homework_assignments(teacher_id, assignment_kind, status);
+-- initDb creates idx_assignment_teacher_kind after migrating legacy assignment columns.
 CREATE INDEX IF NOT EXISTS idx_notification_status_scheduled ON notification_log(status, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_vocab_items_source_lesson ON vocab_items(source_id, lesson_id);
 CREATE INDEX IF NOT EXISTS idx_test_sessions_student_status_completed ON test_sessions(student_id, status, completed_at DESC);

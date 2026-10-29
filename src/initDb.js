@@ -55,8 +55,10 @@ function runMigrations() {
 function initDb() {
   const schemaPath = path.resolve(__dirname, "schema.sql");
   const sql = fs.readFileSync(schemaPath, "utf8");
-  db.exec(sql);
-  runMigrations();
+  db.transaction(() => {
+    db.exec(sql);
+    runMigrations();
+  })();
 }
 
 module.exports = initDb;
